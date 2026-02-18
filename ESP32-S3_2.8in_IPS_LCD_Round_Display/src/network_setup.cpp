@@ -6,7 +6,7 @@
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
-#include "sensESP_setup.h"
+#include "network_setup.h"
 #include "signalk_config.h"
 #include "gauge_config.h"
 #include "screen_config_c_api.h"
@@ -50,7 +50,7 @@ extern "C" void show_fallback_error_screen_if_needed() {
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
-#include "sensESP_setup.h"
+#include "network_setup.h"
 #include "signalk_config.h"
 #include "gauge_config.h"
 #include "screen_config_c_api.h"

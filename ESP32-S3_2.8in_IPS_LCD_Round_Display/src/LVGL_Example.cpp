@@ -396,10 +396,8 @@ void example1_increase_lvgl_tick(lv_timer_t * t)
   lv_textarea_set_placeholder_text(Board_angle, buf);
   snprintf(buf, sizeof(buf), "%d.%d.%d   %d:%d:%d\r\n",datetime.year,datetime.month,datetime.day,datetime.hour,datetime.minute,datetime.second);
   lv_textarea_set_placeholder_text(RTC_Time, buf);
-  if(Scan_finish)
-    snprintf(buf, sizeof(buf), "WIFI: %d    BLE: %d    ..Scan Finish.\r\n",WIFI_NUM,BLE_NUM);
-  else
-    snprintf(buf, sizeof(buf), "WIFI: %d    BLE: %d\r\n",WIFI_NUM,BLE_NUM);
+  // Wireless scan disabled (BLE not available)
+  snprintf(buf, sizeof(buf), "Wireless scan disabled");
   lv_textarea_set_placeholder_text(Wireless_Scan, buf);
   lv_slider_set_value(Backlight_slider, LCD_Backlight, LV_ANIM_ON); 
   LVGL_Backlight_adjustment(LCD_Backlight);

@@ -5,7 +5,7 @@
 #include "RTC_PCF85063.h"
 #include "SD_Card.h"
 #include "BAT_Driver.h"
-#include "Wireless.h"
+// #include "Wireless.h"  // Disabled: BLE not available, functions not used
 #include "Display_ST7701.h"  
 
 #define EXAMPLE1_LVGL_TICK_PERIOD_MS  1000

@@ -25,7 +25,7 @@ Build and upload instructions:
 
 See the main project root for full source code and assets.
 
-Use and SD cards for your icons and images, Store the icons and png (ideally monochrome images) and then you can change the colours. Convert your larger background images to bin files. There is a convert script in the project that will help you in you cant do this in your image tool.
+Use an SD cards for your icons and images, Store the icons and png (ideally monochrome images) and then you can change the colours. Convert your larger background images to bin files. There is a convert script in the project that will help you in you cant do this in your image tool.
 
 The display is 480x480, so make your background images this size
 

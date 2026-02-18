@@ -1,5 +1,5 @@
 #include "signalk_config.h"
-#include "sensESP_setup.h"
+#include "network_setup.h"
 #include <WiFi.h>
 #include <esp_wifi.h>
 #include <WebSocketsClient.h>

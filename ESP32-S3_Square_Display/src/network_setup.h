@@ -1,6 +1,6 @@
 
-#ifndef SENSEXP_SETUP_H
-#define SENSEXP_SETUP_H
+#ifndef NETWORK_SETUP_H
+#define NETWORK_SETUP_H
 
 #include <Arduino.h>
 #include <WebServer.h>
@@ -19,10 +19,10 @@ extern uint16_t auto_scroll_sec;
 // Request the UI to change auto-scroll interval at runtime
 void set_auto_scroll_interval(uint16_t sec);
 
-// Initialize SensESP with web UI for configuration
-void setup_sensESP();
+// Initialize network (WiFi + WebServer) with web UI for configuration
+void setup_network();
 
-// Check if WiFi is connected via SensESP
+// Check if WiFi is connected
 bool is_wifi_connected();
 
 // Get configured Signal K server IP (empty string if not configured)

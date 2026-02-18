@@ -1,5 +1,5 @@
 #include "signalk_config.h"
-#include "sensESP_setup.h"
+#include "network_setup.h"
 #include <WiFi.h>
 #include <esp_wifi.h>
 #include <WebSocketsClient.h>
@@ -271,7 +271,7 @@ void enable_signalk(const char* ssid, const char* password, const char* server_i
         ws_queue_mutex = xSemaphoreCreateMutex();
     }
     
-    // WiFi should already be connected from setup_sensESP()
+    // WiFi should already be connected from setup_network()
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("Signal K: WiFi not connected, aborting");
         signalk_enabled = false;

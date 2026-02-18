@@ -11,7 +11,7 @@ bool test_mode = false;
 #include "ui_Settings.h"
 #include "signalk_config.h"
 #include "screen_config_c_api.h"
-#include "sensESP_setup.h"
+#include "network_setup.h"
 #include "gauge_config.h"
 #include "needle_style.h"
 #ifdef __cplusplus
@@ -447,7 +447,7 @@ void setup() {
     // Enable WiFi with optimizations
     Serial.println("Starting WiFi setup...");
     Serial.flush();
-    setup_sensESP();
+    setup_network();
     Serial.println("WiFi setup complete");
     Serial.flush();
     

@@ -64,7 +64,7 @@ extern "C" void show_fallback_error_screen_if_needed() {
 #include "esp_log.h"
 #include "needle_style.h"
 
-static const char *TAG_SETUP = "sensESP_setup";
+static const char *TAG_SETUP = "network_setup";
 
 // Expose a small helper to dump loaded screen configs for debugging
 void dump_screen_configs(void) {
@@ -1271,7 +1271,7 @@ void handle_save_needles() {
 }
 
 
-void setup_sensESP() {
+void setup_network() {
     Serial.begin(115200);
     delay(100);
     Serial.printf("Flash size (ESP.getFlashChipSize()): %u bytes\n", ESP.getFlashChipSize());

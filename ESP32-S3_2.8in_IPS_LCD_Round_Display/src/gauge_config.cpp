@@ -31,10 +31,10 @@ int16_t gauge_value_to_angle_screen(float value, int screen, int gauge) {
     if (value < cal[0].value) return cal[0].angle;
     return cal[4].angle;
 }
-// Use the Preferences object from sensESP_setup.cpp for all calibration storage
+// Use the Preferences object from network_setup.cpp for all calibration storage
 #include "gauge_config.h"
 #include <Arduino.h>
-#include "sensESP_setup.h"
+#include "network_setup.h"
 #include "signalk_config.h"
 extern Preferences preferences;
 GaugeConfig current_config;

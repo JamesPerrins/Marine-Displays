@@ -4,7 +4,7 @@
 #include "TCA9554PWR.h"  // For buzzer control
 #include <WiFi.h>
 
-#include "sensESP_setup.h"
+#include "network_setup.h"
 #include <Preferences.h>
 
 extern lv_obj_t *ui_Screen1;  // Reference to main screen

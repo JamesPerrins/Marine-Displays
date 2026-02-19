@@ -115,12 +115,15 @@ bool apply_icons_for_screen(int s) {
     bool any = false;
     if (top) {
         const char *p = screen_configs[s].icon_paths[0];
+        ESP_LOGI(TAG_UIHOT, "[LVGL IMG DEBUG] screen=%d top icon ptr=%p path='%s' len=%d", s, p, (p ? p : "NULL"), (p ? strlen(p) : -1));
         if (p && p[0] != '\0') {
             ESP_LOGI(TAG_UIHOT, "[LVGL IMG] screen=%d top icon path='%s' src_type=%d", s, p, (int)lv_img_src_get_type((const void*)p));
             lv_img_set_src(top, p);
+            lv_obj_set_style_img_opa(top, LV_OPA_COVER, 0);  // Make fully opaque
             lv_obj_clear_flag(top, LV_OBJ_FLAG_HIDDEN);
         } else {
-            ESP_LOGI(TAG_UIHOT, "[LVGL IMG] screen=%d top icon none", s);
+            ESP_LOGI(TAG_UIHOT, "[LVGL IMG] screen=%d top icon none - HIDING", s);
+            lv_obj_set_style_img_opa(top, LV_OPA_TRANSP, 0);  // Make completely transparent
             lv_obj_add_flag(top, LV_OBJ_FLAG_HIDDEN);
         }
         lv_obj_invalidate(top);
@@ -136,12 +139,13 @@ bool apply_icons_for_screen(int s) {
             if (p && p[0] != '\0') {
                 ESP_LOGI(TAG_UIHOT, "[LVGL IMG] screen=%d bottom icon path='%s' src_type=%d", s, p, (int)lv_img_src_get_type((const void*)p));
                 lv_img_set_src(bot, p);
+                lv_obj_set_style_img_opa(bot, LV_OPA_COVER, 0);  // Make fully opaque
                 lv_obj_clear_flag(bot, LV_OBJ_FLAG_HIDDEN);
             } else {
                 ESP_LOGI(TAG_UIHOT, "[LVGL IMG] screen=%d bottom icon none", s);
+                lv_obj_set_style_img_opa(bot, LV_OPA_TRANSP, 0);  // Make completely transparent
                 lv_obj_add_flag(bot, LV_OBJ_FLAG_HIDDEN);
             }
-            lv_obj_clear_flag(bot, LV_OBJ_FLAG_HIDDEN);
             lv_obj_invalidate(bot);
         }
         any = true;
@@ -161,10 +165,16 @@ bool apply_icons_for_screen(int s) {
 
 // Apply visuals for all screens. Returns true if at least one target object was present.
 bool apply_all_screen_visuals() {
+    ESP_LOGI(TAG_UIHOT, "[APPLY_ALL] Starting apply_all_screen_visuals()");
     bool any = false;
     for (int s = 0; s < NUM_SCREENS; ++s) {
+        ESP_LOGI(TAG_UIHOT, "[APPLY_ALL] Processing screen %d, display_type=%d", s, screen_configs[s].display_type);
         bool a = apply_background_for_screen(s);
-        bool b = apply_icons_for_screen(s);
+        // Skip generic icon handling for GAUGE_NUMBER - it handles icons itself  
+        bool b = false;
+        if (screen_configs[s].display_type != DISPLAY_TYPE_GAUGE_NUMBER) {
+            b = apply_icons_for_screen(s);
+        }
         any = any || a || b;
         
         // If this screen is set to number display mode, recreate the number display
@@ -205,15 +215,8 @@ bool apply_all_screen_visuals() {
             lv_obj_t *bot_icon = get_bottom_icon_obj_for_screen(s);
             if (top_icon) lv_obj_add_flag(top_icon, LV_OBJ_FLAG_HIDDEN);
             if (bot_icon) lv_obj_add_flag(bot_icon, LV_OBJ_FLAG_HIDDEN);
-            // Recreate dual display with updated settings
-            dual_number_display_create(
-                s,
-                screen_configs[s].dual_top_font_size,
-                screen_configs[s].dual_top_font_color,
-                screen_configs[s].dual_bottom_font_size,
-                screen_configs[s].dual_bottom_font_color,
-                screen_configs[s].number_bg_color
-            );
+            // Recreate dual display with updated settings (reads from screen_configs)
+            dual_number_display_create(s);
             any = true;
         } else if (screen_configs[s].display_type == DISPLAY_TYPE_QUAD) {
             // Destroy other display types first
@@ -230,21 +233,11 @@ bool apply_all_screen_visuals() {
             lv_obj_t *bot_icon = get_bottom_icon_obj_for_screen(s);
             if (top_icon) lv_obj_add_flag(top_icon, LV_OBJ_FLAG_HIDDEN);
             if (bot_icon) lv_obj_add_flag(bot_icon, LV_OBJ_FLAG_HIDDEN);
-            // Recreate quad display with updated settings
-            quad_number_display_create(
-                s,
-                screen_configs[s].quad_tl_font_size,
-                screen_configs[s].quad_tl_font_color,
-                screen_configs[s].quad_tr_font_size,
-                screen_configs[s].quad_tr_font_color,
-                screen_configs[s].quad_bl_font_size,
-                screen_configs[s].quad_bl_font_color,
-                screen_configs[s].quad_br_font_size,
-                screen_configs[s].quad_br_font_color,
-                screen_configs[s].number_bg_color
-            );
+            // Recreate quad display with updated settings (reads from screen_configs)
+            quad_number_display_create(s);
             any = true;
         } else if (screen_configs[s].display_type == DISPLAY_TYPE_GAUGE_NUMBER) {
+            ESP_LOGI(TAG_UIHOT, "[GAUGE_NUM] Handling screen=%d as GAUGE_NUMBER", s);
             // Destroy other display types first
             number_display_destroy(s);
             dual_number_display_destroy(s);
@@ -259,12 +252,49 @@ bool apply_all_screen_visuals() {
             if (bot) {
                 lv_obj_add_flag(bot, LV_OBJ_FLAG_HIDDEN);
             }
+            // Handle top icon visibility based on icon_paths[0]
+            lv_obj_t *top_icon = get_top_icon_obj_for_screen(s);
+            const char *p = screen_configs[s].icon_paths[0];
+            ESP_LOGI(TAG_UIHOT, "[GAUGE_NUM] screen=%d icon_paths[0]=%p, value='%s', len=%d",
+                s, p, (p ? p : "NULL"), (p ? strlen(p) : -1));
+            if (top_icon) {
+                ESP_LOGI(TAG_UIHOT, "[GAUGE_NUM] screen=%d top_icon object exists at %p", s, top_icon);
+                if (p && p[0] != '\0') {
+                    ESP_LOGI(TAG_UIHOT, "[GAUGE_NUM] screen=%d SHOWING icon: '%s'", s, p);
+                    lv_img_set_src(top_icon, p);
+                    lv_obj_set_style_img_opa(top_icon, LV_OPA_COVER, 0);  // Make fully opaque
+                    lv_obj_set_size(top_icon, LV_SIZE_CONTENT, LV_SIZE_CONTENT);  // Restore size
+                    lv_obj_align(top_icon, LV_ALIGN_CENTER, 0, -70);  // Restore position
+                    lv_obj_clear_flag(top_icon, LV_OBJ_FLAG_HIDDEN);
+                } else {
+                    ESP_LOGI(TAG_UIHOT, "[GAUGE_NUM] screen=%d HIDING icon (empty path)", s);
+                    lv_obj_set_style_img_opa(top_icon, LV_OPA_TRANSP, 0);  // Make completely transparent
+                    lv_obj_add_flag(top_icon, LV_OBJ_FLAG_HIDDEN);
+                    lv_obj_set_pos(top_icon, -5000, -5000);  // Move way off screen
+                    lv_obj_set_size(top_icon, 0, 0);  // Make zero size
+                    // Verify it's actually hidden
+                    bool is_hidden = lv_obj_has_flag(top_icon, LV_OBJ_FLAG_HIDDEN);
+                    ESP_LOGI(TAG_UIHOT, "[GAUGE_NUM] screen=%d icon hidden flag set: %s", s, is_hidden ? "YES" : "NO");
+                }
+            } else {
+                ESP_LOGI(TAG_UIHOT, "[GAUGE_NUM] screen=%d top_icon object is NULL!", s);
+            }
             // Recreate gauge+number display with updated settings
             gauge_number_display_create(
                 s,
                 screen_configs[s].gauge_num_center_font_size,
                 screen_configs[s].gauge_num_center_font_color
             );
+            ESP_LOGI(TAG_UIHOT, "[GAUGE_NUM] screen=%d gauge_number_display_create() completed", s);
+            // Double-check icon is still hidden after display creation
+            if (top_icon && (!p || p[0] == '\0')) {
+                bool still_hidden = lv_obj_has_flag(top_icon, LV_OBJ_FLAG_HIDDEN);
+                ESP_LOGI(TAG_UIHOT, "[GAUGE_NUM] screen=%d AFTER display create, icon still hidden: %s", s, still_hidden ? "YES" : "NO");
+                if (!still_hidden) {
+                    ESP_LOGE(TAG_UIHOT, "[GAUGE_NUM] screen=%d WARNING: Icon was unhidden by display creation! Re-hiding...", s);
+                    lv_obj_add_flag(top_icon, LV_OBJ_FLAG_HIDDEN);
+                }
+            }
             any = true;
         } else if (screen_configs[s].display_type == DISPLAY_TYPE_GRAPH) {
             // Destroy other display types first
@@ -306,5 +336,6 @@ bool apply_all_screen_visuals() {
     if (any) {
         lv_refr_now(NULL);
     }
+    ESP_LOGI(TAG_UIHOT, "[APPLY_ALL] Completed apply_all_screen_visuals(), returning %s", any ? "true" : "false");
     return any;
 }

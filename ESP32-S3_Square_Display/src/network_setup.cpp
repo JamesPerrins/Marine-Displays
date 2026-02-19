@@ -406,7 +406,7 @@ void load_preferences() {
     if (preferences.begin(SETTINGS_NAMESPACE, true)) {
         saved_ssid = preferences.getString("ssid", "");
         saved_password = preferences.getString("password", "");
-        saved_signalk_ip = preferences.getString("signalk_ip", "");
+        saved_signalk_ip = preferences.getString("signalk_ip", "openplotter.local");
         saved_signalk_port = preferences.getUShort("signalk_port", 0);
         saved_hostname = preferences.getString("hostname", "");
         // Load auto-scroll interval (seconds)
@@ -463,7 +463,7 @@ void load_preferences() {
         screen_configs[s].display_type = DISPLAY_TYPE_GAUGE;
         // number display defaults (background uses bg_image field: empty/"Default" = default, bin path = file, "Custom Color" = color)
         strncpy(screen_configs[s].number_bg_color, "#000000", 7);
-        screen_configs[s].number_font_size = 1;  // Medium (48pt)
+        screen_configs[s].number_font_size = 0;  // Large (96pt)
         strncpy(screen_configs[s].number_font_color, "#FFFFFF", 7);
         screen_configs[s].number_path[0] = '\0';  // Empty path
         // dual display defaults
@@ -767,18 +767,12 @@ void handle_gauges_page() {
         html += "<div style='margin-bottom:8px;'><label>Font Size: <select name='number_font_size_" + String(s) + "'>";
         html += "<option value='0'";
         if (screen_configs[s].number_font_size == 0) html += " selected";
-        html += ">Small (48pt)</option>";
+        html += ">Large (96pt)</option>";
         html += "<option value='1'";
         if (screen_configs[s].number_font_size == 1) html += " selected";
-        html += ">Medium (72pt)</option>";
+        html += ">X-Large (120pt)</option>";
         html += "<option value='2'";
         if (screen_configs[s].number_font_size == 2) html += " selected";
-        html += ">Large (96pt)</option>";
-        html += "<option value='3'";
-        if (screen_configs[s].number_font_size == 3) html += " selected";
-        html += ">X-Large (120pt)</option>";
-        html += "<option value='4'";
-        if (screen_configs[s].number_font_size == 4) html += " selected";
         html += ">XX-Large (144pt)</option>";
         html += "</select></label></div>";
         
@@ -1345,10 +1339,7 @@ void handle_save_gauges() {
                 String iconValue = config_server.arg(iconKey);
                 iconValue.replace("S://", "S:/");
                 while (iconValue.indexOf("//") != -1) iconValue.replace("//", "/");
-                // Detect if the icon path actually changed; if so, request a reboot
-                if (strncmp(screen_configs[s].icon_paths[g], iconValue.c_str(), 127) != 0) {
-                    reboot_needed = true;
-                }
+                // Icon changes are now handled by hot-apply, no reboot needed
                 strncpy(screen_configs[s].icon_paths[g], iconValue.c_str(), 127);
                 screen_configs[s].icon_paths[g][127] = '\0';
                 // Save icon position (does not require reboot)
@@ -1621,13 +1612,14 @@ void handle_save_gauges() {
             if (nvs_enum_err == ESP_OK) {
                 Serial.println("[NVS ENUM] Listing all keys in 'gaugeconfig' namespace after icon/zone save:");
                 nvs_iterator_t it = NULL;
-                esp_err_t enum_find_err = nvs_entry_find(NULL, PREF_NAMESPACE, NVS_TYPE_ANY, &it);
-                while (enum_find_err == ESP_OK && it != NULL) {
+                nvs_entry_find(NULL, PREF_NAMESPACE, NVS_TYPE_ANY, &it);
+                while (it != NULL) {
                     nvs_entry_info_t info;
                     nvs_entry_info(it, &info);
                     Serial.printf("[NVS ENUM] key: %s, type: %d\n", info.key, info.type);
-                    enum_find_err = nvs_entry_next(&it);
+                    nvs_entry_next(&it);
                 }
+                if (it != NULL) nvs_release_iterator(it);
                 Serial.println("[NVS ENUM] End of key list.");
                 nvs_close(nvs_enum_handle);
             } else {
@@ -2082,6 +2074,15 @@ std::vector<String> get_all_signalk_paths() {
         if (center_path.length() > 0 && unique_paths.find(center_path) == unique_paths.end()) {
             unique_paths.insert(center_path);
             all_paths.push_back(center_path);
+        }
+    }
+    
+    // Add graph display second series paths
+    for (int s = 0; s < NUM_SCREENS; s++) {
+        String graph_path_2 = String(screen_configs[s].graph_path_2);
+        if (graph_path_2.length() > 0 && unique_paths.find(graph_path_2) == unique_paths.end()) {
+            unique_paths.insert(graph_path_2);
+            all_paths.push_back(graph_path_2);
         }
     }
     

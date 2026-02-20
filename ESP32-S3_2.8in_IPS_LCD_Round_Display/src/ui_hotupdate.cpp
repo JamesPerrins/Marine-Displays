@@ -2,6 +2,7 @@
 #include "ui.h"
 #include "screen_config_c_api.h"
 #include <lvgl.h>
+#include "esp_log.h"
 
 // Forward declarations for embedded image fallbacks (provided by SquareLine ui.h)
 extern const char *ui_img_rev_counter_png;
@@ -84,13 +85,18 @@ bool apply_icons_for_screen(int s) {
     bool any = false;
     if (top) {
         const char *p = screen_configs[s].icon_paths[0];
+        ESP_LOGW("ICON_HOTUPDATE", "[TOP] screen=%d icon_path='%s' len=%d", s, (p ? p : "NULL"), (p ? strlen(p) : -1));
         if (p && p[0] != '\0') {
+            ESP_LOGW("ICON_HOTUPDATE", "[TOP] Setting source: '%s'", p);
             lv_img_set_src(top, p);
             lv_obj_set_style_img_opa(top, LV_OPA_COVER, 0);
             lv_obj_clear_flag(top, LV_OBJ_FLAG_HIDDEN);
+            ESP_LOGW("ICON_HOTUPDATE", "[TOP] Icon shown, opa=COVER, hidden=false");
         } else {
+            ESP_LOGW("ICON_HOTUPDATE", "[TOP] Icon path empty - setting to transparent/hidden");
             lv_obj_set_style_img_opa(top, LV_OPA_TRANSP, 0);
             lv_obj_add_flag(top, LV_OBJ_FLAG_HIDDEN);
+            ESP_LOGW("ICON_HOTUPDATE", "[TOP] Icon hidden, opa=TRANSP, hidden=true");
         }
         lv_obj_invalidate(top);
         any = true;
@@ -98,17 +104,23 @@ bool apply_icons_for_screen(int s) {
     if (bot) {
         // Respect per-screen show_bottom flag: hide bottom icon if disabled
         if (!screen_configs[s].show_bottom) {
+            ESP_LOGW("ICON_HOTUPDATE", "[BOT] screen=%d show_bottom=false - hiding", s);
             lv_obj_set_style_img_opa(bot, LV_OPA_TRANSP, 0);
             lv_obj_add_flag(bot, LV_OBJ_FLAG_HIDDEN);
         } else {
             const char *p = screen_configs[s].icon_paths[1];
+            ESP_LOGW("ICON_HOTUPDATE", "[BOT] screen=%d show_bottom=true icon_path='%s' len=%d", s, (p ? p : "NULL"), (p ? strlen(p) : -1));
             if (p && p[0] != '\0') {
+                ESP_LOGW("ICON_HOTUPDATE", "[BOT] Setting source: '%s'", p);
                 lv_img_set_src(bot, p);
                 lv_obj_set_style_img_opa(bot, LV_OPA_COVER, 0);
                 lv_obj_clear_flag(bot, LV_OBJ_FLAG_HIDDEN);
+                ESP_LOGW("ICON_HOTUPDATE", "[BOT] Icon shown, opa=COVER, hidden=false");
             } else {
+                ESP_LOGW("ICON_HOTUPDATE", "[BOT] Icon path empty - setting to transparent/hidden");
                 lv_obj_set_style_img_opa(bot, LV_OPA_TRANSP, 0);
                 lv_obj_add_flag(bot, LV_OBJ_FLAG_HIDDEN);
+                ESP_LOGW("ICON_HOTUPDATE", "[BOT] Icon hidden, opa=TRANSP, hidden=true");
             }
             lv_obj_invalidate(bot);
         }

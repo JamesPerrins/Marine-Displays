@@ -286,10 +286,14 @@ void _ui_apply_icon_style(lv_obj_t *img, int screen, int gauge)
    if (screen < 0 || (size_t)screen >= total_screens) return;
    if (gauge < 0 || gauge > 1) return;
 
+   const char *icon_path = screen_configs[screen].icon_paths[gauge];
+   ESP_LOGW(TAG_UI_HELPERS, "[ICON INIT] screen=%d gauge=%d path='%s'", screen, gauge, (icon_path ? icon_path : "NULL"));
+
    // If the bottom gauge is globally disabled for this screen, ensure the
    // bottom icon remains hidden and skip further styling.
    if (gauge == 1 && screen_configs[screen].show_bottom == 0) {
       lv_obj_add_flag(img, LV_OBJ_FLAG_HIDDEN);
+      ESP_LOGW(TAG_UI_HELPERS, "[ICON INIT] screen=%d gauge=%d bottom disabled - hiding icon", screen, gauge);
       return;
    }
 
@@ -336,7 +340,6 @@ void _ui_apply_icon_style(lv_obj_t *img, int screen, int gauge)
     * background image. Applying an image recolor to a full-screen asset will tint
     * the entire display — treat these as non-recolorable to avoid coloring the
     * whole screen. */
-   const char *icon_path = screen_configs[screen].icon_paths[gauge];
    bool is_bin_asset = false;
    if (icon_path) {
       const char *ext = strrchr(icon_path, '.');
@@ -395,6 +398,14 @@ void _ui_apply_icon_style(lv_obj_t *img, int screen, int gauge)
 
    /* Force a redraw of the image to ensure style changes are applied immediately. */
    lv_obj_invalidate(img);
+   
+   // Log final icon state
+   bool final_hidden = lv_obj_has_flag(img, LV_OBJ_FLAG_HIDDEN);
+   uint8_t final_opa = lv_obj_get_style_img_opa(img, LV_PART_MAIN);
+   lv_img_src_t src_type = lv_img_src_get_type((const void*)screen_configs[screen].icon_paths[gauge]);
+   ESP_LOGW(TAG_UI_HELPERS, "[ICON FINAL] screen=%d gauge=%d hidden=%d opa=%d src_type=%d", 
+      screen, gauge, final_hidden, final_opa, src_type);
+   
       /* Apply configured icon position (override default UI-generated coords).
       * Positions: 0=top, 1=right, 2=bottom, 3=left
       */

@@ -94,6 +94,7 @@ bool apply_icons_for_screen(int s) {
             ESP_LOGW("ICON_HOTUPDATE", "[TOP] Icon shown, opa=COVER, hidden=false");
         } else {
             ESP_LOGW("ICON_HOTUPDATE", "[TOP] Icon path empty - setting to transparent/hidden");
+            lv_img_set_src(top, NULL);
             lv_obj_set_style_img_opa(top, LV_OPA_TRANSP, 0);
             lv_obj_add_flag(top, LV_OBJ_FLAG_HIDDEN);
             ESP_LOGW("ICON_HOTUPDATE", "[TOP] Icon hidden, opa=TRANSP, hidden=true");
@@ -105,6 +106,7 @@ bool apply_icons_for_screen(int s) {
         // Respect per-screen show_bottom flag: hide bottom icon if disabled
         if (!screen_configs[s].show_bottom) {
             ESP_LOGW("ICON_HOTUPDATE", "[BOT] screen=%d show_bottom=false - hiding", s);
+            lv_img_set_src(bot, NULL);
             lv_obj_set_style_img_opa(bot, LV_OPA_TRANSP, 0);
             lv_obj_add_flag(bot, LV_OBJ_FLAG_HIDDEN);
         } else {
@@ -118,6 +120,7 @@ bool apply_icons_for_screen(int s) {
                 ESP_LOGW("ICON_HOTUPDATE", "[BOT] Icon shown, opa=COVER, hidden=false");
             } else {
                 ESP_LOGW("ICON_HOTUPDATE", "[BOT] Icon path empty - setting to transparent/hidden");
+                lv_img_set_src(bot, NULL);
                 lv_obj_set_style_img_opa(bot, LV_OPA_TRANSP, 0);
                 lv_obj_add_flag(bot, LV_OBJ_FLAG_HIDDEN);
                 ESP_LOGW("ICON_HOTUPDATE", "[BOT] Icon hidden, opa=TRANSP, hidden=true");

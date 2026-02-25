@@ -355,9 +355,30 @@ static void update_number_display_for_screen(int screen_num) {
         }
         // else keep unit as-is (V, A, rpm, etc.)
     } else {
-        // Path not found in subscribed paths
-        display_value = NAN;
-        unit_str = "N/A";
+        // Path is not a gauge path — look it up via extended sensor maps
+        display_value = get_sensor_value_by_path(number_path);
+        unit_str = get_sensor_unit_by_path(number_path);
+        description = get_sensor_description_by_path(number_path);
+        // Apply unit conversions (same as gauge path branch above)
+        if (unit_str == "K") {
+            if (!isnan(display_value)) display_value -= 273.15f;
+            unit_str = "°C";
+        } else if (unit_str == "Pa") {
+            if (!isnan(display_value)) display_value /= 100000.0f;
+            unit_str = "bar";
+        } else if (unit_str == "ratio") {
+            if (!isnan(display_value)) display_value *= 100.0f;
+            unit_str = "%";
+        } else if (unit_str == "Hz") {
+            if (!isnan(display_value)) display_value *= 60.0f;
+            unit_str = "RPM";
+        } else if (unit_str == "m/s") {
+            if (!isnan(display_value)) display_value *= 1.94384f;
+            unit_str = "kn";
+        } else if (unit_str == "rad") {
+            if (!isnan(display_value)) display_value *= 57.2958f;
+            unit_str = "°";
+        }
     }
     
     // Create number display if it doesn't exist (note: may also be created externally via ui_hotupdate)
@@ -905,21 +926,30 @@ void test_move_gauge(int screen, int gauge, int angle) {
     }
 }
 
+// ets_printf writes directly to hardware UART0 (visible on CH343 monitor)
+// even when Serial uses USB-OTG CDC (ARDUINO_USB_CDC_ON_BOOT=1).
+extern "C" int ets_printf(const char *fmt, ...);
+
 void setup() {
-        // test_nvs_minimal() removed during cleanup
+    // Immediate hardware UART0 marker - visible on CH343 even before USB CDC comes up
+    ets_printf("\r\n\r\n*** SETUP() START ***\r\n");
+
     // Serial for debugging - with timeout
     Serial.setTxTimeoutMs(0);  // Non-blocking serial
     Serial.begin(115200);
     delay(500);
-    
+
+    ets_printf("*** Serial.begin done ***\r\n");
     Serial.println("\n\n=== ESP32 Round Display Starting ===");
     Serial.flush();
     
     // I2C and IO expander
+    ets_printf("*** I2C_Init start ***\r\n");
     I2C_Init();
     delay(100);
     TCA9554PWR_Init(0x00);
     Set_EXIO(EXIO_PIN6, Low);    // Start with buzzer OFF (board uses EXIO_PIN6)
+    ets_printf("*** I2C+expander done ***\r\n");
     Serial.println("I2C and IO expander initialized");
     Serial.flush();
     
@@ -955,7 +985,9 @@ void setup() {
     esp_log_level_set("esp_panel", ESP_LOG_WARN);
 
     // Initialize the display
+    ets_printf("*** LCD_Init start ***\r\n");
     LCD_Init();
+    ets_printf("*** LCD_Init done ***\r\n");
 
     // Stage 3: Full SD re-init now that the display has finished taking the SPI pins
     Serial.println("SD: now performing SD_MMC.begin('/sdcard', true) after display init");

@@ -86,6 +86,34 @@ void dump_screen_configs(void) {
     }
 }
 
+// Returns a safe 7-char hex color string ('#RRGGBB') for use in HTML attributes.
+// If the char array doesn't contain a valid hex color, returns the fallback.
+static String safeColor(const char* c, const char* fallback = "#000000") {
+    if (!c || c[0] != '#') return fallback;
+    for (int i = 1; i <= 6; i++) {
+        if (!c[i]) return fallback;
+        char ch = c[i];
+        if (!((ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'F') || (ch >= 'a' && ch <= 'f')))
+            return fallback;
+    }
+    return String(c).substring(0, 7);
+}
+
+// Returns a sanitized copy of a char-array field with only printable ASCII chars.
+// Prevents non-UTF-8 binary bytes from being injected into HTML responses.
+static String safeStr(const char* s, size_t maxlen = 128) {
+    if (!s) return "";
+    size_t len = 0;
+    while (len < maxlen && s[len]) len++;
+    String result;
+    result.reserve(len);
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c >= 0x20 && c <= 0x7E) result += (char)c;
+    }
+    return result;
+}
+
 // Minimal HTML style used by the configuration web pages
 const String STYLE = R"rawliteral(
 <style>
@@ -463,7 +491,7 @@ void load_preferences() {
         screen_configs[s].display_type = DISPLAY_TYPE_GAUGE;
         // number display defaults (background uses bg_image field: empty/"Default" = default, bin path = file, "Custom Color" = color)
         strncpy(screen_configs[s].number_bg_color, "#000000", 7);
-        screen_configs[s].number_font_size = 0;  // Large (96pt)
+        screen_configs[s].number_font_size = 2;  // Large (96pt)
         strncpy(screen_configs[s].number_font_color, "#FFFFFF", 7);
         screen_configs[s].number_path[0] = '\0';  // Empty path
         // dual display defaults
@@ -544,11 +572,12 @@ void load_preferences() {
                     size_t got = f.read((uint8_t *)&screen_configs[s], sizeof(ScreenConfig));
                     Serial.printf("[SD LOAD] Read '%s' -> %u bytes (expected %u)\n", sdpath, (unsigned)got, (unsigned)sizeof(ScreenConfig));
                     f.close();
-                    // Validate loaded config
+                    // Validate loaded config - angles are int16_t and can be negative
+                    // Only reject if angle is wildly out of range (e.g. corrupted flash)
                     bool valid = true;
                     for (int g = 0; g < 2 && valid; ++g) {
                         for (int p = 0; p < 5; ++p) {
-                            if (screen_configs[s].cal[g][p].angle < 0 || screen_configs[s].cal[g][p].angle > 360) {
+                            if (screen_configs[s].cal[g][p].angle < -360 || screen_configs[s].cal[g][p].angle > 360) {
                                 valid = false; break;
                             }
                         }
@@ -668,10 +697,23 @@ void handle_gauges_page() {
             }
         }
     }
-    String html = "<!DOCTYPE html><html><head>";
+    // Start chunked HTTP response immediately — avoids holding the whole page (~50KB) in RAM at once.
+    config_server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    config_server.send(200, "text/html; charset=utf-8", "");
+    String html;
+    html.reserve(4096);
+    // Lambda: send buffered html to client and clear the buffer.
+    auto flushHtml = [&]() {
+        if (html.length() > 0) {
+            config_server.sendContent(html);
+            html = "";
+        }
+    };
+    html = "<!DOCTYPE html><html><head>";
     html += "<meta charset='UTF-8'>";
     html += STYLE;
     html += "<title>Gauge Calibration</title></head><body><div class='container'>";
+    flushHtml(); // flush header + styles before body content
     extern bool test_mode;
     html += "<h2>Gauge Calibration</h2>";
     html += "<form method='POST' action='/toggle-test-mode' style='margin-bottom:16px;text-align:center;'>";
@@ -765,14 +807,14 @@ void handle_gauges_page() {
         
         // Font size
         html += "<div style='margin-bottom:8px;'><label>Font Size: <select name='number_font_size_" + String(s) + "'>";
-        html += "<option value='0'";
-        if (screen_configs[s].number_font_size == 0) html += " selected";
-        html += ">Large (96pt)</option>";
-        html += "<option value='1'";
-        if (screen_configs[s].number_font_size == 1) html += " selected";
-        html += ">X-Large (120pt)</option>";
         html += "<option value='2'";
-        if (screen_configs[s].number_font_size == 2) html += " selected";
+        if (screen_configs[s].number_font_size <= 2) html += " selected";
+        html += ">Large (96pt)</option>";
+        html += "<option value='3'";
+        if (screen_configs[s].number_font_size == 3) html += " selected";
+        html += ">X-Large (120pt)</option>";
+        html += "<option value='4'";
+        if (screen_configs[s].number_font_size == 4) html += " selected";
         html += ">XX-Large (144pt)</option>";
         html += "</select></label></div>";
         
@@ -942,7 +984,7 @@ void handle_gauges_page() {
             for (int i = 1; i <= 4; ++i) {
                 float minVal = screen_configs[s].min[g][i];
                 float maxVal = screen_configs[s].max[g][i];
-                String colorVal = String(screen_configs[s].color[g][i]);
+                String colorVal = safeColor(screen_configs[s].color[g][i], "#000000");
                 bool transVal = screen_configs[s].transparent[g][i] != 0;
                 bool bzrVal = screen_configs[s].buzzer[g][i] != 0;
                 html += "<div class='zone-item'><label>Min " + String(i) + ": <input name='mnv" + String(s) + String(g) + String(i) + "' type='number' step='any' value='" + String(minVal) + "' style='width:100px'></label></div>";
@@ -1025,7 +1067,7 @@ void handle_gauges_page() {
         for (int i = 1; i <= 4; ++i) {
             float minVal = screen_configs[s].min[0][i];
             float maxVal = screen_configs[s].max[0][i];
-            String colorVal = String(screen_configs[s].color[0][i]);
+            String colorVal = safeColor(screen_configs[s].color[0][i], "#000000");
             bool transVal = screen_configs[s].transparent[0][i] != 0;
             bool bzrVal = screen_configs[s].buzzer[0][i] != 0;
             html += "<div class='zone-item'><label>Min " + String(i) + ": <input name='mnv" + String(s) + "0" + String(i) + "' type='number' step='any' value='" + String(minVal) + "' style='width:100px'></label></div>";
@@ -1123,6 +1165,7 @@ void handle_gauges_page() {
         html += "</div>"; // close graphconfig div
         
         html += "</div>"; // close tab content
+        flushHtml(); // flush after each screen tab to keep memory usage low
     }
     // Tab JS and Apply button (ensure inside form)
     html += "<div style='text-align:center; margin-top:16px;'><input type='submit' name='apply' value='Apply (no reboot)' style='padding:10px 24px; font-size:1.1em;'></div>";
@@ -1292,7 +1335,8 @@ void handle_gauges_page() {
     html += "});</script>";
     html += "<p style='text-align:center;'><a href='/'>Back</a></p>";
     html += "</div></body></html>";
-    config_server.send(200, "text/html", html);
+    flushHtml(); // send final chunk
+    config_server.sendContent(""); // close chunked transfer
 }
 
 void handle_save_gauges() {
@@ -1605,37 +1649,6 @@ void handle_save_gauges() {
         Serial.println("[DEBUG] Screen configs after save (including buzzer flags):");
         dump_screen_configs();
         
-        // NVS key enumeration debug (after all saves, before reboot)
-        {
-            nvs_handle_t nvs_enum_handle;
-            esp_err_t nvs_enum_err = nvs_open(PREF_NAMESPACE, NVS_READONLY, &nvs_enum_handle);
-            if (nvs_enum_err == ESP_OK) {
-                Serial.println("[NVS ENUM] Listing all keys in 'gaugeconfig' namespace after icon/zone save:");
-                nvs_iterator_t it = NULL;
-#if ESP_IDF_VERSION_MAJOR >= 5
-                nvs_entry_find(NULL, PREF_NAMESPACE, NVS_TYPE_ANY, &it);
-                while (it != NULL) {
-                    nvs_entry_info_t info;
-                    nvs_entry_info(it, &info);
-                    Serial.printf("[NVS ENUM] key: %s, type: %d\n", info.key, info.type);
-                    nvs_entry_next(&it);
-                }
-#else
-                it = nvs_entry_find(NULL, PREF_NAMESPACE, NVS_TYPE_ANY);
-                while (it != NULL) {
-                    nvs_entry_info_t info;
-                    nvs_entry_info(it, &info);
-                    Serial.printf("[NVS ENUM] key: %s, type: %d\n", info.key, info.type);
-                    it = nvs_entry_next(it);
-                }
-#endif
-                if (it != NULL) nvs_release_iterator(it);
-                Serial.println("[NVS ENUM] End of key list.");
-                nvs_close(nvs_enum_handle);
-            } else {
-                Serial.printf("[NVS ENUM] nvs_open failed: %d\n", nvs_enum_err);
-            }
-        }
         // Try to apply visual changes at runtime (hot-update). If LVGL objects are not present
         // or the update fails, fall back to reboot to ensure a clean load.
         if (reboot_needed) {

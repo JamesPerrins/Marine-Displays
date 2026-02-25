@@ -47,6 +47,11 @@ void number_display_create(int screen_num) {
     // Clean up existing labels if they exist
     number_display_destroy(screen_num);
     
+    // Clear prev-value cache so the first update after recreate always writes to the new labels
+    prev_number_text[screen_num][0] = '\0';
+    prev_unit_text[screen_num][0] = '\0';
+    prev_description_text[screen_num][0] = '\0';
+    
     // Hide gauge elements (needles and icons)
     lv_obj_t* top_needles[] = {ui_Needle, ui_Needle2, ui_Needle3, ui_Needle4, ui_Needle5};
     lv_obj_t* bottom_needles[] = {ui_Lower_Needle, ui_Lower_Needle2, ui_Lower_Needle3, ui_Lower_Needle4, ui_Lower_Needle5};
@@ -81,19 +86,24 @@ void number_display_create(int screen_num) {
     // All sizes use custom Inter fonts with scaling for larger sizes
     // Use Inter fonts - all native sizes, no scaling for crisp text
     const lv_font_t* value_font = &inter_48;  // Default to 48pt
-    const lv_font_t* unit_font = &inter_24;
+    const lv_font_t* unit_font = &inter_24;    // Will be scaled below
     int zoom_scale = 256;  // 256 = 1x (100%), LVGL uses 256 as base (always 1x now)
     
     if (cfg.number_font_size == 0) {  // Small - 48pt native
         value_font = &inter_48;
+        unit_font  = &inter_24;
     } else if (cfg.number_font_size == 1) {  // Medium - 72pt native
         value_font = &inter_72;
+        unit_font  = &inter_24;
     } else if (cfg.number_font_size == 2) {  // Large - 96pt native
         value_font = &inter_96;
+        unit_font  = &inter_48;
     } else if (cfg.number_font_size == 3) {  // X-Large - 120pt native
         value_font = &inter_120;
+        unit_font  = &inter_48;
     } else if (cfg.number_font_size == 4) {  // XX-Large - 144pt native
         value_font = &inter_144;
+        unit_font  = &inter_72;
     }
     // zoom_scale stays at 256 (1x) for all sizes - no scaling needed
     
@@ -127,10 +137,10 @@ void number_display_create(int screen_num) {
     Serial.printf("[NUMBER_DISPLAY] Applied zoom %d to label (font_size setting: %d)\n", 
                   zoom_scale, cfg.number_font_size);
     
-    // Create unit label (bottom right corner)
+    // Create unit label (bottom right corner) — height accommodates up to 72pt font
     unit_labels[screen_num] = lv_label_create(screen);
     lv_label_set_text(unit_labels[screen_num], "");
-    lv_obj_set_size(unit_labels[screen_num], 200, 36);  // Fixed width AND height
+    lv_obj_set_size(unit_labels[screen_num], 300, 90);  // Wide + tall enough for 72pt
     lv_label_set_long_mode(unit_labels[screen_num], LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_align(unit_labels[screen_num], LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_set_style_text_font(unit_labels[screen_num], unit_font, 0);

@@ -368,14 +368,15 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
         last_message_time = millis();
         // reset backoff on successful connect
         current_backoff_ms = RECONNECT_BASE_MS;
-        // Build subscription JSON
-        DynamicJsonDocument subdoc(1024);
+        // Build subscription JSON for ALL configured paths (gauge, number, dual, quad, gauge+num, graph)
+        std::vector<String> all_conn_paths = get_all_signalk_paths();
+        DynamicJsonDocument subdoc(2048);
         subdoc["context"] = "vessels.self";
         JsonArray subs = subdoc.createNestedArray("subscribe");
-        for (int i = 0; i < TOTAL_PARAMS; i++) {
-            if (signalk_paths[i].length() > 0) {
+        for (const String& p : all_conn_paths) {
+            if (p.length() > 0) {
                 JsonObject s = subs.createNestedObject();
-                s["path"] = signalk_paths[i];
+                s["path"] = p;
                 s["period"] = 0; // instant updates (server may push immediately)
             }
         }

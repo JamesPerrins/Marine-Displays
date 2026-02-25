@@ -213,6 +213,7 @@ const char* PREF_NAMESPACE = "gaugeconfig";
 extern int buzzer_mode;
 extern uint16_t buzzer_cooldown_sec;
 extern bool first_run_buzzer;
+extern unsigned long last_buzzer_time;
 extern uint8_t LCD_Backlight;
 // UI control helpers (implemented in ui.c)
 extern "C" int ui_get_current_screen(void);
@@ -442,8 +443,10 @@ void load_preferences() {
         // Load device settings
         buzzer_mode = (int)preferences.getUShort("buzzer_mode", (uint16_t)buzzer_mode);
         buzzer_cooldown_sec = preferences.getUShort("buzzer_cooldown", buzzer_cooldown_sec);
-        // Mark first run so buzzer logic can re-evaluate immediately
-        first_run_buzzer = true;
+        // Arm cooldown timer so the first alarm fires after one cooldown period,
+        // preventing spurious alarm from 0.00 before real SK data arrives.
+        first_run_buzzer = false;
+        last_buzzer_time = millis();
         uint16_t saved_brightness = preferences.getUShort("brightness", (uint16_t)LCD_Backlight);
         LCD_Backlight = (uint8_t)saved_brightness;
         // Apply brightness to hardware
@@ -787,9 +790,11 @@ void handle_gauges_page() {
             if (iconNorm == savedBgNorm && savedBg.length() > 0) html += " selected='selected'";
             html += ">" + b + "</option>";
         }
-        // Add Custom Color option for number displays
+        // Add Custom Color option for number displays (hidden for Gauge and Gauge+Number types)
         html += "<option value='Custom Color'";
         if (savedBg == "Custom Color") html += " selected='selected'";
+        if (screen_configs[s].display_type == DISPLAY_TYPE_GAUGE ||
+            screen_configs[s].display_type == DISPLAY_TYPE_GAUGE_NUMBER) html += " hidden disabled";
         html += ">Custom Color</option>";
         html += "</select></label></div>";
         
@@ -820,6 +825,21 @@ void handle_gauges_page() {
         
         // Font color
         html += "<div style='margin-bottom:8px;'><label>Font Color: <input name='number_font_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].number_font_color[0] ? screen_configs[s].number_font_color : "#FFFFFF") + "'></label></div>";
+        
+        // Alarm thresholds (stored in gauge zone slots 0/1 which are unused by number display)
+        html += "<div class='icon-section'>";
+        html += "<h5 style='margin:0 0 8px;'>Alarms</h5>";
+        html += "<div style='display:flex;gap:16px;flex-wrap:wrap;'>";
+        html += "<div><label>Low Alarm &lt; <input name='num_low_thresh_" + String(s) + "' type='number' step='any' value='" + String(screen_configs[s].min[0][1]) + "' style='width:90px'></label> ";
+        html += "<label><input type='checkbox' name='num_low_buz_" + String(s) + "'";
+        if (screen_configs[s].buzzer[0][1]) html += " checked";
+        html += "> Enable</label></div>";
+        html += "<div><label>High Alarm &gt; <input name='num_high_thresh_" + String(s) + "' type='number' step='any' value='" + String(screen_configs[s].max[0][2]) + "' style='width:90px'></label> ";
+        html += "<label><input type='checkbox' name='num_high_buz_" + String(s) + "'";
+        if (screen_configs[s].buzzer[0][2]) html += " checked";
+        html += "> Enable</label></div>";
+        html += "</div>";
+        html += "</div>"; // End alarm box
         
         html += "</div>"; // End number display config
         
@@ -852,7 +872,21 @@ void handle_gauges_page() {
         html += ">XX-Large (144pt)</option>";
         html += "</select></label></div>";
         html += "<div style='margin-bottom:8px;'><label>Font Color: <input name='dual_top_font_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].dual_top_font_color[0] ? screen_configs[s].dual_top_font_color : "#FFFFFF") + "'></label></div>";
-        
+
+        // Top display alarm (g=0, z=1 low, z=2 high)
+        html += "<div class='icon-section'>";
+        html += "<h5 style='margin:0 0 6px;'>Alarms</h5>";
+        html += "<div style='display:flex;gap:16px;flex-wrap:wrap;'>";
+        html += "<label>Low &lt; <input name='dual_top_low_thresh_" + String(s) + "' type='number' step='any' value='" + String(screen_configs[s].min[0][1]) + "' style='width:90px'></label> ";
+        html += "<label><input type='checkbox' name='dual_top_low_buz_" + String(s) + "'";
+        if (screen_configs[s].buzzer[0][1]) html += " checked";
+        html += "> Enable</label> ";
+        html += "<label>High &gt; <input name='dual_top_high_thresh_" + String(s) + "' type='number' step='any' value='" + String(screen_configs[s].max[0][2]) + "' style='width:90px'></label> ";
+        html += "<label><input type='checkbox' name='dual_top_high_buz_" + String(s) + "'";
+        if (screen_configs[s].buzzer[0][2]) html += " checked";
+        html += "> Enable</label></div>";
+        html += "</div>"; // End top alarm box
+
         // Bottom display settings
         html += "<h5>Bottom Display</h5>";
         html += "<div style='margin-bottom:8px;'><label>SignalK Path: <input name='dual_bottom_path_" + String(s) + "' type='text' value='" + String(screen_configs[s].dual_bottom_path) + "' style='width:80%'></label></div>";
@@ -874,7 +908,21 @@ void handle_gauges_page() {
         html += ">XX-Large (144pt)</option>";
         html += "</select></label></div>";
         html += "<div style='margin-bottom:8px;'><label>Font Color: <input name='dual_bottom_font_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].dual_bottom_font_color[0] ? screen_configs[s].dual_bottom_font_color : "#FFFFFF") + "'></label></div>";
-        
+
+        // Bottom display alarm (g=1, z=1 low, z=2 high)
+        html += "<div class='icon-section'>";
+        html += "<h5 style='margin:0 0 6px;'>Alarms</h5>";
+        html += "<div style='display:flex;gap:16px;flex-wrap:wrap;'>";
+        html += "<label>Low &lt; <input name='dual_bot_low_thresh_" + String(s) + "' type='number' step='any' value='" + String(screen_configs[s].min[1][1]) + "' style='width:90px'></label> ";
+        html += "<label><input type='checkbox' name='dual_bot_low_buz_" + String(s) + "'";
+        if (screen_configs[s].buzzer[1][1]) html += " checked";
+        html += "> Enable</label> ";
+        html += "<label>High &gt; <input name='dual_bot_high_thresh_" + String(s) + "' type='number' step='any' value='" + String(screen_configs[s].max[1][2]) + "' style='width:90px'></label> ";
+        html += "<label><input type='checkbox' name='dual_bot_high_buz_" + String(s) + "'";
+        if (screen_configs[s].buzzer[1][2]) html += " checked";
+        html += "> Enable</label></div>";
+        html += "</div>"; // End bottom alarm box
+
         html += "</div>"; // End dual display config
         
         // Quad display configuration (hidden when display_type is not Quad)
@@ -885,7 +933,8 @@ void handle_gauges_page() {
         html += "<div style='margin-bottom:8px;'><label>Background Color: <input name='quad_bg_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].number_bg_color[0] ? screen_configs[s].number_bg_color : "#000000") + "'></label></div>";
         
         // Helper function for quad quadrant HTML (we'll define it inline)
-        auto addQuadrantHTML = [&](const char* name, const char* label, char* path, uint8_t size, char* color) {
+        // Quad alarm slot mapping: TL=g0z1/2, TR=g0z3/4, BL=g1z1/2, BR=g1z3/4
+        auto addQuadrantHTML = [&](const char* name, const char* label, char* path, uint8_t size, char* color, int g_alm, int zl, int zh) {
             html += "<h5>" + String(label) + "</h5>";
             html += "<div style='margin-bottom:4px;'><label>SignalK Path: <input name='quad_" + String(name) + "_path_" + String(s) + "' type='text' value='" + String(path) + "' style='width:80%'></label></div>";
             html += "<div style='margin-bottom:4px;'><label>Font Size: <select name='quad_" + String(name) + "_font_size_" + String(s) + "'>";
@@ -899,14 +948,27 @@ void handle_gauges_page() {
                 html += "</option>";
             }
             html += "</select></label></div>";
-            html += "<div style='margin-bottom:8px;'><label>Font Color: <input name='quad_" + String(name) + "_font_color_" + String(s) + "' type='color' value='" + String(color[0] ? color : "#FFFFFF") + "'></label></div>";
+            html += "<div style='margin-bottom:4px;'><label>Font Color: <input name='quad_" + String(name) + "_font_color_" + String(s) + "' type='color' value='" + String(color[0] ? color : "#FFFFFF") + "'></label></div>";
+            // Per-quadrant alarm fields
+            html += "<div class='icon-section'>";
+            html += "<h5 style='margin:0 0 6px;'>Alarms</h5>";
+            html += "<div style='display:flex;gap:8px;flex-wrap:wrap;'>";
+            html += "<label>Low &lt; <input name='quad_" + String(name) + "_low_thresh_" + String(s) + "' type='number' step='any' value='" + String(screen_configs[s].min[g_alm][zl]) + "' style='width:80px'></label> ";
+            html += "<label><input type='checkbox' name='quad_" + String(name) + "_low_buz_" + String(s) + "'";
+            if (screen_configs[s].buzzer[g_alm][zl]) html += " checked";
+            html += "> Enable</label> ";
+            html += "<label>High &gt; <input name='quad_" + String(name) + "_high_thresh_" + String(s) + "' type='number' step='any' value='" + String(screen_configs[s].max[g_alm][zh]) + "' style='width:80px'></label> ";
+            html += "<label><input type='checkbox' name='quad_" + String(name) + "_high_buz_" + String(s) + "'";
+            if (screen_configs[s].buzzer[g_alm][zh]) html += " checked";
+            html += "> Enable</label></div>";
+            html += "</div>"; // End alarm box
         };
-        
-        addQuadrantHTML("tl", "Top-Left", screen_configs[s].quad_tl_path, screen_configs[s].quad_tl_font_size, screen_configs[s].quad_tl_font_color);
-        addQuadrantHTML("tr", "Top-Right", screen_configs[s].quad_tr_path, screen_configs[s].quad_tr_font_size, screen_configs[s].quad_tr_font_color);
-        addQuadrantHTML("bl", "Bottom-Left", screen_configs[s].quad_bl_path, screen_configs[s].quad_bl_font_size, screen_configs[s].quad_bl_font_color);
-        addQuadrantHTML("br", "Bottom-Right", screen_configs[s].quad_br_path, screen_configs[s].quad_br_font_size, screen_configs[s].quad_br_font_color);
-        
+
+        addQuadrantHTML("tl", "Top-Left",     screen_configs[s].quad_tl_path, screen_configs[s].quad_tl_font_size, screen_configs[s].quad_tl_font_color, 0, 1, 2);
+        addQuadrantHTML("tr", "Top-Right",    screen_configs[s].quad_tr_path, screen_configs[s].quad_tr_font_size, screen_configs[s].quad_tr_font_color, 0, 3, 4);
+        addQuadrantHTML("bl", "Bottom-Left",  screen_configs[s].quad_bl_path, screen_configs[s].quad_bl_font_size, screen_configs[s].quad_bl_font_color, 1, 1, 2);
+        addQuadrantHTML("br", "Bottom-Right", screen_configs[s].quad_br_path, screen_configs[s].quad_br_font_size, screen_configs[s].quad_br_font_color, 1, 3, 4);
+
         html += "</div>"; // End quad display config
         
         // Gauge configuration container (hidden when display_type is Number)
@@ -1104,7 +1166,22 @@ void handle_gauges_page() {
         html += ">XX-Large (144pt)</option>";
         html += "</select></label></div>";
         html += "<div style='margin-bottom:8px;'><label>Font Color: <input name='gauge_num_center_font_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].gauge_num_center_font_color[0] ? screen_configs[s].gauge_num_center_font_color : "#FFFFFF") + "'></label></div>";
-        
+
+        // Center number alarms: min[1][1]/buzzer[1][1]=low, max[1][2]/buzzer[1][2]=high
+        html += "<div class='icon-section'>";
+        html += "<h5 style='margin:0 0 8px;'>Alarms</h5>";
+        html += "<div style='display:flex;gap:16px;flex-wrap:wrap;'>";
+        html += "<div><label>Low Alarm &lt; <input name='gnum_low_thresh_" + String(s) + "' type='number' step='any' value='" + String(screen_configs[s].min[1][1]) + "' style='width:90px'></label> ";
+        html += "<label><input type='checkbox' name='gnum_low_buz_" + String(s) + "'";
+        if (screen_configs[s].buzzer[1][1]) html += " checked";
+        html += "> Enable</label></div>";
+        html += "<div><label>High Alarm &gt; <input name='gnum_high_thresh_" + String(s) + "' type='number' step='any' value='" + String(screen_configs[s].max[1][2]) + "' style='width:90px'></label> ";
+        html += "<label><input type='checkbox' name='gnum_high_buz_" + String(s) + "'";
+        if (screen_configs[s].buzzer[1][2]) html += " checked";
+        html += "> Enable</label></div>";
+        html += "</div>";
+        html += "</div>"; // End alarm box
+
         html += "</div>"; // close gaugenumconfig div
         
         // Graph configuration (display_type == 5)
@@ -1259,6 +1336,19 @@ void handle_gauges_page() {
     html += "      gaugeNumDiv.style.display = 'none'; disableInputs(gaugeNumDiv, true);\n";
     html += "      graphDiv.style.display = 'block'; disableInputs(graphDiv, false);\n";
     html += "      console.log('Set graphDiv display to block for screen '+screen);\n";
+    html += "    }\n";
+    html += "  }\n";
+    html += "  // Hide Custom Color option for Gauge (0) and Gauge+Number (4) display types\n";
+    html += "  var bgSel = document.getElementById('bg_image_'+screen);\n";
+    html += "  if(bgSel && sel){\n";
+    html += "    var ccOpt = bgSel.querySelector(\"option[value='Custom Color']\");\n";
+    html += "    var isGaugeType = (sel.value === '0' || sel.value === '4');\n";
+    html += "    if(ccOpt){\n";
+    html += "      ccOpt.hidden = isGaugeType;\n";
+    html += "      ccOpt.disabled = isGaugeType;\n";
+    html += "      if(isGaugeType && bgSel.value === 'Custom Color'){\n";
+    html += "        bgSel.value = bgSel.options[0].value;\n";
+    html += "      }\n";
     html += "    }\n";
     html += "  }\n";
     html += "  toggleBgImageColor(screen);\n";
@@ -1445,6 +1535,56 @@ void handle_save_gauges() {
                         screen_configs[s].number_font_color[7] = '\0';
                     }
                     
+                    // Save number display alarm thresholds (reuse gauge zone slots 0/1 and 0/2)
+                    // Only for NUMBER screens — dual/quad reuse the same slots
+                    if (screen_configs[s].display_type == DISPLAY_TYPE_NUMBER) {
+                        String numLowThreshKey = "num_low_thresh_" + String(s);
+                        if (config_server.hasArg(numLowThreshKey)) {
+                            screen_configs[s].min[0][1] = config_server.arg(numLowThreshKey).toFloat();
+                        }
+                        screen_configs[s].buzzer[0][1] = config_server.hasArg("num_low_buz_" + String(s)) ? 1 : 0;
+
+                        String numHighThreshKey = "num_high_thresh_" + String(s);
+                        if (config_server.hasArg(numHighThreshKey)) {
+                            screen_configs[s].max[0][2] = config_server.arg(numHighThreshKey).toFloat();
+                        }
+                        screen_configs[s].buzzer[0][2] = config_server.hasArg("num_high_buz_" + String(s)) ? 1 : 0;
+                    }
+
+                    // Save dual display alarm thresholds — only for DUAL screens
+                    // Top:    min[0][1]/buzzer[0][1]=low,  max[0][2]/buzzer[0][2]=high
+                    // Bottom: min[1][1]/buzzer[1][1]=low,  max[1][2]/buzzer[1][2]=high
+                    if (screen_configs[s].display_type == DISPLAY_TYPE_DUAL) {
+                        if (config_server.hasArg("dual_top_low_thresh_" + String(s)))
+                            screen_configs[s].min[0][1] = config_server.arg("dual_top_low_thresh_" + String(s)).toFloat();
+                        screen_configs[s].buzzer[0][1] = config_server.hasArg("dual_top_low_buz_" + String(s)) ? 1 : 0;
+                        if (config_server.hasArg("dual_top_high_thresh_" + String(s)))
+                            screen_configs[s].max[0][2] = config_server.arg("dual_top_high_thresh_" + String(s)).toFloat();
+                        screen_configs[s].buzzer[0][2] = config_server.hasArg("dual_top_high_buz_" + String(s)) ? 1 : 0;
+                        if (config_server.hasArg("dual_bot_low_thresh_" + String(s)))
+                            screen_configs[s].min[1][1] = config_server.arg("dual_bot_low_thresh_" + String(s)).toFloat();
+                        screen_configs[s].buzzer[1][1] = config_server.hasArg("dual_bot_low_buz_" + String(s)) ? 1 : 0;
+                        if (config_server.hasArg("dual_bot_high_thresh_" + String(s)))
+                            screen_configs[s].max[1][2] = config_server.arg("dual_bot_high_thresh_" + String(s)).toFloat();
+                        screen_configs[s].buzzer[1][2] = config_server.hasArg("dual_bot_high_buz_" + String(s)) ? 1 : 0;
+                    }
+
+                    // Save quad display alarm thresholds — only for QUAD screens
+                    // TL=g0z1/2, TR=g0z3/4, BL=g1z1/2, BR=g1z3/4
+                    if (screen_configs[s].display_type == DISPLAY_TYPE_QUAD) {
+                        struct { const char* nm; int g, zl, zh; } qalms[4] = {
+                            {"tl",0,1,2},{"tr",0,3,4},{"bl",1,1,2},{"br",1,3,4}
+                        };
+                        for (int q = 0; q < 4; q++) {
+                            String lk = "quad_" + String(qalms[q].nm) + "_low_thresh_"  + String(s);
+                            String hk = "quad_" + String(qalms[q].nm) + "_high_thresh_" + String(s);
+                            if (config_server.hasArg(lk)) screen_configs[s].min[qalms[q].g][qalms[q].zl] = config_server.arg(lk).toFloat();
+                            screen_configs[s].buzzer[qalms[q].g][qalms[q].zl] = config_server.hasArg("quad_" + String(qalms[q].nm) + "_low_buz_"  + String(s)) ? 1 : 0;
+                            if (config_server.hasArg(hk)) screen_configs[s].max[qalms[q].g][qalms[q].zh] = config_server.arg(hk).toFloat();
+                            screen_configs[s].buzzer[qalms[q].g][qalms[q].zh] = config_server.hasArg("quad_" + String(qalms[q].nm) + "_high_buz_" + String(s)) ? 1 : 0;
+                        }
+                    }
+
                     // Save dual display background color (uses same field as number display)
                     String dualBgColorKey = "dual_bg_color_" + String(s);
                     if (config_server.hasArg(dualBgColorKey)) {
@@ -1534,6 +1674,17 @@ void handle_save_gauges() {
                         strncpy(screen_configs[s].gauge_num_center_font_color, config_server.arg(gaugeNumCenterFontColorKey).c_str(), 7);
                         screen_configs[s].gauge_num_center_font_color[7] = '\0';
                     }
+
+                    // Save gauge+number center alarm thresholds — only for GAUGE_NUMBER screens
+                    // min[1][1]/buzzer[1][1]=low, max[1][2]/buzzer[1][2]=high
+                    if (screen_configs[s].display_type == DISPLAY_TYPE_GAUGE_NUMBER) {
+                        if (config_server.hasArg("gnum_low_thresh_" + String(s)))
+                            screen_configs[s].min[1][1] = config_server.arg("gnum_low_thresh_" + String(s)).toFloat();
+                        screen_configs[s].buzzer[1][1] = config_server.hasArg("gnum_low_buz_" + String(s)) ? 1 : 0;
+                        if (config_server.hasArg("gnum_high_thresh_" + String(s)))
+                            screen_configs[s].max[1][2] = config_server.arg("gnum_high_thresh_" + String(s)).toFloat();
+                        screen_configs[s].buzzer[1][2] = config_server.hasArg("gnum_high_buz_" + String(s)) ? 1 : 0;
+                    }
                     
                     // Graph chart type
                     String graphChartTypeKey = "graph_chart_type_" + String(s);
@@ -1564,7 +1715,12 @@ void handle_save_gauges() {
                 // Only process zone settings if the first zone field is in the form
                 // (gauges hidden by display type won't submit their zone fields)
                 String firstZoneKey = "mnv" + String(s) + String(g) + "1";
-                if (config_server.hasArg(firstZoneKey)) {
+                // Only save gauge zones for actual gauge screens.
+                // NUMBER, DUAL, QUAD screens reuse these slots for alarm thresholds;
+                // saving the (hidden) gauge form fields would overwrite those values.
+                if (config_server.hasArg(firstZoneKey) &&
+                    (screen_configs[s].display_type == DISPLAY_TYPE_GAUGE ||
+                     screen_configs[s].display_type == DISPLAY_TYPE_GAUGE_NUMBER)) {
                     for (int i = 1; i <= 4; ++i) {
                         String minKey = "mnv" + String(s) + String(g) + String(i);
                         String maxKey = "mxv" + String(s) + String(g) + String(i);
@@ -1831,7 +1987,10 @@ void handle_save_device() {
 
         buzzer_mode = bm;
         buzzer_cooldown_sec = bcd;
-        first_run_buzzer = true;
+        // Arm cooldown so first alarm fires after one cooldown period, not immediately.
+        // Prevents spurious alarm on 0.00 value when mode is first enabled.
+        first_run_buzzer = false;
+        last_buzzer_time = millis();
         Serial.printf("[DEVICE SAVE_POST] buzzer_mode=%d buzzer_cooldown_sec=%u first_run_buzzer=%d auto_scroll=%u\n",
                   buzzer_mode, buzzer_cooldown_sec, (int)first_run_buzzer, (unsigned)auto_scroll_sec);
 

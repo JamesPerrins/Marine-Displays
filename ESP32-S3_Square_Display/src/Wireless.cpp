@@ -37,9 +37,9 @@ int ble_scan_number()
   BLEScan* pBLEScan = BLEDevice::getScan();
   pBLEScan->setActiveScan(true);
 
-  BLEScanResults* foundDevices = pBLEScan->start(5);  
+  BLEScanResults foundDevices = pBLEScan->start(5);  
   vTaskDelay(5000);       
-  int count = foundDevices->getCount();
+  int count = foundDevices.getCount();
   if (count == 0)
   {
     printf("No Bluetooth device was scanned\r\n");

@@ -156,9 +156,9 @@ void PCF85063_Set_Alarm(datetime_t time)
 {
 
 	uint8_t buf[5] ={
-		decToBcd(time.second)&(~RTC_ALARM),
-		decToBcd(time.minute)&(~RTC_ALARM),
-		decToBcd(time.hour)&(~RTC_ALARM),
+		(uint8_t)(decToBcd(time.second)&(~RTC_ALARM)),
+		(uint8_t)(decToBcd(time.minute)&(~RTC_ALARM)),
+		(uint8_t)(decToBcd(time.hour)&(~RTC_ALARM)),
 		//decToBcd(time.day)&(~RTC_ALARM),
 		//decToBcd(time.dotw)&(~RTC_ALARM)
 		RTC_ALARM, 	//disalbe day

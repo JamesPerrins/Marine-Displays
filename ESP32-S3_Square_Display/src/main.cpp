@@ -522,6 +522,34 @@ static void update_dual_number_display_for_screen(int screen_num) {
                                         isnan(bottom_value) ? 0.0f : bottom_value, 
                                         bottom_unit.c_str(), 
                                         bottom_description.c_str());
+
+    // Buzzer alarm check for Dual display
+    // Top:    min/max/buzzer[0][1] = low,  [0][2] = high
+    // Bottom: min/max/buzzer[1][1] = low,  [1][2] = high
+    if (buzzer_mode != 0) {
+        extern uint16_t buzzer_cooldown_sec;
+        unsigned long ALERT_COOLDOWN_MS = (buzzer_cooldown_sec == 0) ? 0UL : (unsigned long)buzzer_cooldown_sec * 1000UL;
+        unsigned long now_buz = millis();
+        bool cooldown_ok = (now_buz - last_buzzer_time > ALERT_COOLDOWN_MS);
+        float dual_vals[2] = { top_value, bottom_value };
+        for (int ch = 0; ch < 2; ch++) {
+            if (isnan(dual_vals[ch])) continue;
+            bool la = (screen_configs[screen_idx].buzzer[ch][1] != 0);
+            bool ha = (screen_configs[screen_idx].buzzer[ch][2] != 0);
+            bool lf = la && (dual_vals[ch] < screen_configs[screen_idx].min[ch][1]);
+            bool hf = ha && (dual_vals[ch] > screen_configs[screen_idx].max[ch][2]);
+            if ((lf || hf) && (first_run_buzzer || cooldown_ok)) {
+                Serial.printf("[ALARM DUAL] screen=%d ch=%d val=%.2f low=%s(%.2f) high=%s(%.2f)\n",
+                    screen_idx, ch, dual_vals[ch],
+                    lf ? "TRIP" : "ok", screen_configs[screen_idx].min[ch][1],
+                    hf ? "TRIP" : "ok", screen_configs[screen_idx].max[ch][2]);
+                trigger_buzzer_alert();
+                last_buzzer_time = now_buz;
+                first_run_buzzer = false;
+                break; // one beep per update cycle
+            }
+        }
+    }
 }
 
 // Update quad number displays for the active screen using live Signal K sensor values
@@ -598,6 +626,35 @@ static void update_quad_number_display_for_screen(int screen_num) {
     quad_number_display_update_tr(screen_idx, isnan(tr_value) ? 0.0f : tr_value, tr_unit.c_str(), tr_description.c_str());
     quad_number_display_update_bl(screen_idx, isnan(bl_value) ? 0.0f : bl_value, bl_unit.c_str(), bl_description.c_str());
     quad_number_display_update_br(screen_idx, isnan(br_value) ? 0.0f : br_value, br_unit.c_str(), br_description.c_str());
+
+    // Buzzer alarm check for Quad display
+    // Slot mapping: TL=g0 z1(low)/z2(high), TR=g0 z3(low)/z4(high)
+    //               BL=g1 z1(low)/z2(high), BR=g1 z3(low)/z4(high)
+    if (buzzer_mode != 0) {
+        extern uint16_t buzzer_cooldown_sec;
+        unsigned long ALERT_COOLDOWN_MS = (buzzer_cooldown_sec == 0) ? 0UL : (unsigned long)buzzer_cooldown_sec * 1000UL;
+        unsigned long now_buz = millis();
+        bool cooldown_ok = (now_buz - last_buzzer_time > ALERT_COOLDOWN_MS);
+        bool quad_fired = false;
+        auto check_quad = [&](float val, int g, int zl, int zh) {
+            if (quad_fired || isnan(val)) return;
+            bool la = (screen_configs[screen_idx].buzzer[g][zl] != 0);
+            bool ha = (screen_configs[screen_idx].buzzer[g][zh] != 0);
+            bool lf = la && (val < screen_configs[screen_idx].min[g][zl]);
+            bool hf = ha && (val > screen_configs[screen_idx].max[g][zh]);
+            if ((lf || hf) && (first_run_buzzer || cooldown_ok)) quad_fired = true;
+        };
+        check_quad(tl_value, 0, 1, 2);
+        check_quad(tr_value, 0, 3, 4);
+        check_quad(bl_value, 1, 1, 2);
+        check_quad(br_value, 1, 3, 4);
+        if (quad_fired) {
+            Serial.printf("[ALARM QUAD] screen=%d fired\n", screen_idx);
+            trigger_buzzer_alert();
+            last_buzzer_time = now_buz;
+            first_run_buzzer = false;
+        }
+    }
 }
 
 // Update gauge+number display for the active screen using live Signal K sensor values
@@ -667,6 +724,28 @@ static void update_gauge_number_display_for_screen(int screen_num) {
                                          isnan(center_value) ? 0.0f : center_value, 
                                          center_unit.c_str(), 
                                          center_description.c_str());
+
+    // Buzzer alarm check for Gauge+Number center display
+    // min[1][1]/buzzer[1][1]=low, max[1][2]/buzzer[1][2]=high
+    if (!isnan(center_value) && buzzer_mode != 0) {
+        extern uint16_t buzzer_cooldown_sec;
+        unsigned long ALERT_COOLDOWN_MS = (buzzer_cooldown_sec == 0) ? 0UL : (unsigned long)buzzer_cooldown_sec * 1000UL;
+        unsigned long now_buz = millis();
+        bool cooldown_ok = (now_buz - last_buzzer_time > ALERT_COOLDOWN_MS);
+        bool la = (screen_configs[screen_idx].buzzer[1][1] != 0);
+        bool ha = (screen_configs[screen_idx].buzzer[1][2] != 0);
+        bool lf = la && (center_value < screen_configs[screen_idx].min[1][1]);
+        bool hf = ha && (center_value > screen_configs[screen_idx].max[1][2]);
+        if ((lf || hf) && (first_run_buzzer || cooldown_ok)) {
+            Serial.printf("[ALARM GNUM] screen=%d center=%.2f low=%s(%.2f) high=%s(%.2f)\n",
+                screen_idx, center_value,
+                lf ? "TRIP" : "ok", screen_configs[screen_idx].min[1][1],
+                hf ? "TRIP" : "ok", screen_configs[screen_idx].max[1][2]);
+            trigger_buzzer_alert();
+            last_buzzer_time = now_buz;
+            first_run_buzzer = false;
+        }
+    }
 }
 
 static void update_graph_display_for_screen(int screen_num) {
@@ -1363,7 +1442,7 @@ void loop() {
                                 break;
                             }
                         }
-                        // Also check number display alarms for this screen (inside s loop, so s is in scope)
+                        // Also check number display alarms for this screen
                         if (!fired && screen_configs[s].display_type == DISPLAY_TYPE_NUMBER) {
                             String npath = String(screen_configs[s].number_path);
                             if (npath.length() > 0) {
@@ -1376,6 +1455,56 @@ void loop() {
                                         last_buzzer_time = now;
                                         first_run_buzzer = false;
                                         fired = true;
+                                    }
+                                }
+                            }
+                        }
+                        // Check dual display alarms: top=g0 z1/2, bottom=g1 z1/2
+                        if (!fired && screen_configs[s].display_type == DISPLAY_TYPE_DUAL) {
+                            float dv[2] = {
+                                get_sensor_value_by_path(String(screen_configs[s].dual_top_path)),
+                                get_sensor_value_by_path(String(screen_configs[s].dual_bottom_path))
+                            };
+                            for (int ch = 0; ch < 2 && !fired; ch++) {
+                                if (isnan(dv[ch])) continue;
+                                bool lt = screen_configs[s].buzzer[ch][1] && (dv[ch] < screen_configs[s].min[ch][1]);
+                                bool ht = screen_configs[s].buzzer[ch][2] && (dv[ch] > screen_configs[s].max[ch][2]);
+                                if (lt || ht) {
+                                    trigger_buzzer_alert(); last_buzzer_time = now;
+                                    first_run_buzzer = false; fired = true;
+                                }
+                            }
+                        }
+                        // Check quad display alarms: TL=g0z1/2, TR=g0z3/4, BL=g1z1/2, BR=g1z3/4
+                        if (!fired && screen_configs[s].display_type == DISPLAY_TYPE_QUAD) {
+                            struct { const char* path; int g, zl, zh; } qd[4] = {
+                                { screen_configs[s].quad_tl_path, 0, 1, 2 },
+                                { screen_configs[s].quad_tr_path, 0, 3, 4 },
+                                { screen_configs[s].quad_bl_path, 1, 1, 2 },
+                                { screen_configs[s].quad_br_path, 1, 3, 4 },
+                            };
+                            for (int q = 0; q < 4 && !fired; q++) {
+                                float qv = get_sensor_value_by_path(String(qd[q].path));
+                                if (isnan(qv)) continue;
+                                bool lt = screen_configs[s].buzzer[qd[q].g][qd[q].zl] && (qv < screen_configs[s].min[qd[q].g][qd[q].zl]);
+                                bool ht = screen_configs[s].buzzer[qd[q].g][qd[q].zh] && (qv > screen_configs[s].max[qd[q].g][qd[q].zh]);
+                                if (lt || ht) {
+                                    trigger_buzzer_alert(); last_buzzer_time = now;
+                                    first_run_buzzer = false; fired = true;
+                                }
+                            }
+                        }
+                        // Check gauge+number center alarm: min[1][1]/buzzer[1][1]=low, max[1][2]/buzzer[1][2]=high
+                        if (!fired && screen_configs[s].display_type == DISPLAY_TYPE_GAUGE_NUMBER) {
+                            String cpath = String(screen_configs[s].gauge_num_center_path);
+                            if (cpath.length() > 0) {
+                                float cv = get_sensor_value_by_path(cpath);
+                                if (!isnan(cv)) {
+                                    bool lt = screen_configs[s].buzzer[1][1] && (cv < screen_configs[s].min[1][1]);
+                                    bool ht = screen_configs[s].buzzer[1][2] && (cv > screen_configs[s].max[1][2]);
+                                    if (lt || ht) {
+                                        trigger_buzzer_alert(); last_buzzer_time = now;
+                                        first_run_buzzer = false; fired = true;
                                     }
                                 }
                             }

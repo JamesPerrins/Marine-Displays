@@ -41,6 +41,8 @@ I used Figma to create my images.
 
 Save them on the SD card in a folder called `/assets`.
 
+On first boot, the display creates an SSID called ESP32-SquareDisplay with the password: 12345678 - Browse to 192.168.4.1 to configure your display. 
+
 Video coming soon of the whole feature set and setup.
 
 The Baileys

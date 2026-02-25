@@ -50,6 +50,7 @@ typedef struct {
 } st7701_panel_t;
 
 static const char *TAG = "st7701_rgb";
+static st7701_panel_t *g_st7701_panel_instance = NULL; /* compat: IDF4 esp_lcd_panel_t has no user_data */
 
 static esp_err_t panel_st7701_send_init_cmds(st7701_panel_t *st7701);
 
@@ -80,11 +81,11 @@ esp_err_t esp_lcd_new_panel_st7701_rgb(const esp_lcd_panel_io_handle_t io, const
         ESP_GOTO_ON_ERROR(gpio_config(&io_conf), err, TAG, "configure GPIO for RST line failed");
     }
 
-    switch (panel_dev_config->rgb_ele_order) {
-    case LCD_RGB_ELEMENT_ORDER_RGB:
+    switch ((int)panel_dev_config->color_space) { /* compat: IDF4 uses color_space (0=RGB,1=BGR) instead of IDF5 rgb_ele_order */
+    case 0: /* LCD_RGB_ELEMENT_ORDER_RGB */
         st7701->madctl_val = 0;
         break;
-    case LCD_RGB_ELEMENT_ORDER_BGR:
+    case 1: /* LCD_RGB_ELEMENT_ORDER_BGR */
         st7701->madctl_val |= LCD_CMD_BGR_BIT;
         break;
     default:
@@ -155,14 +156,14 @@ esp_err_t esp_lcd_new_panel_st7701_rgb(const esp_lcd_panel_io_handle_t io, const
     st7701->del = (*ret_panel)->del;
     st7701->reset = (*ret_panel)->reset;
     st7701->mirror = (*ret_panel)->mirror;
-    st7701->disp_on_off = (*ret_panel)->disp_on_off;
+    st7701->disp_on_off = (*ret_panel)->disp_off; /* compat: IDF4 uses disp_off instead of IDF5 disp_on_off */
     // Overwrite the functions of RGB panel
     (*ret_panel)->init = panel_st7701_init;
     (*ret_panel)->del = panel_st7701_del;
     (*ret_panel)->reset = panel_st7701_reset;
     (*ret_panel)->mirror = panel_st7701_mirror;
-    (*ret_panel)->disp_on_off = panel_st7701_disp_on_off;
-    (*ret_panel)->user_data = st7701;
+    (*ret_panel)->disp_off = panel_st7701_disp_on_off; /* compat: IDF4 uses disp_off instead of IDF5 disp_on_off */
+    g_st7701_panel_instance = st7701; /* compat: IDF4 esp_lcd_panel_t has no user_data */
     ESP_LOGD(TAG, "new st7701 panel @%p", st7701);
 
     return ESP_OK;
@@ -358,7 +359,7 @@ static esp_err_t panel_st7701_send_init_cmds(st7701_panel_t *st7701)
 
 static esp_err_t panel_st7701_init(esp_lcd_panel_t *panel)
 {
-    st7701_panel_t *st7701 = (st7701_panel_t *)panel->user_data;
+    st7701_panel_t *st7701 = g_st7701_panel_instance; /* compat: IDF4 has no user_data */
 
     // Log whether we're sending vendor init via 3-wire SPI earlier or during init
     if (st7701->flags.enable_io_multiplex) {
@@ -380,7 +381,7 @@ static esp_err_t panel_st7701_init(esp_lcd_panel_t *panel)
 
 static esp_err_t panel_st7701_del(esp_lcd_panel_t *panel)
 {
-    st7701_panel_t *st7701 = (st7701_panel_t *)panel->user_data;
+    st7701_panel_t *st7701 = g_st7701_panel_instance; /* compat: IDF4 has no user_data */
 
     if (st7701->reset_gpio_num >= 0) {
         gpio_reset_pin(st7701->reset_gpio_num);
@@ -394,7 +395,7 @@ static esp_err_t panel_st7701_del(esp_lcd_panel_t *panel)
 
 static esp_err_t panel_st7701_reset(esp_lcd_panel_t *panel)
 {
-    st7701_panel_t *st7701 = (st7701_panel_t *)panel->user_data;
+    st7701_panel_t *st7701 = g_st7701_panel_instance; /* compat: IDF4 has no user_data */
     esp_lcd_panel_io_handle_t io = st7701->io;
 
     // Perform hardware reset
@@ -415,7 +416,7 @@ static esp_err_t panel_st7701_reset(esp_lcd_panel_t *panel)
 
 static esp_err_t panel_st7701_mirror(esp_lcd_panel_t *panel, bool mirror_x, bool mirror_y)
 {
-    st7701_panel_t *st7701 = (st7701_panel_t *)panel->user_data;
+    st7701_panel_t *st7701 = g_st7701_panel_instance; /* compat: IDF4 has no user_data */
     esp_lcd_panel_io_handle_t io = st7701->io;
     uint8_t sdir_val = 0;
 
@@ -447,7 +448,7 @@ static esp_err_t panel_st7701_mirror(esp_lcd_panel_t *panel, bool mirror_x, bool
 
 static esp_err_t panel_st7701_disp_on_off(esp_lcd_panel_t *panel, bool on_off)
 {
-    st7701_panel_t *st7701 = (st7701_panel_t *)panel->user_data;
+    st7701_panel_t *st7701 = g_st7701_panel_instance; /* compat: IDF4 has no user_data */
     esp_lcd_panel_io_handle_t io = st7701->io;
     int command = 0;
 

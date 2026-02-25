@@ -606,9 +606,22 @@ void handle_gauges_page() {
             }
         }
     }
-    String html = "<!DOCTYPE html><html><head>";
+    // Start chunked HTTP response immediately — avoids holding the whole page (~50KB) in RAM at once.
+    config_server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    config_server.send(200, "text/html; charset=utf-8", "");
+    String html;
+    html.reserve(4096);
+    // Lambda: send buffered html to client and clear the buffer.
+    auto flushHtml = [&]() {
+        if (html.length() > 0) {
+            config_server.sendContent(html);
+            html = "";
+        }
+    };
+    html = "<!DOCTYPE html><html><head>";
     html += STYLE;
     html += "<title>Gauge Calibration</title></head><body><div class='container'>";
+    flushHtml(); // flush header + styles before body content
     extern bool test_mode;
     html += "<h2>Gauge Calibration</h2>";
     html += "<form method='POST' action='/toggle-test-mode' style='margin-bottom:16px;text-align:center;'>";
@@ -636,6 +649,7 @@ void handle_gauges_page() {
             html += "<button type='button' class='tab-btn' id='tabbtn_" + String(s) + "' onclick='(function(){ showScreenTab(" + String(s) + "); fetch(\"/set-screen?screen=" + String(screen_one_based) + "\", {method:\"GET\"}).catch(function(){ }); })()' style='margin:0 4px; padding:8px 16px; font-size:1em;'>Screen " + String(screen_one_based) + "</button>";
         }
     html += "</div>";
+    flushHtml(); // flush tab buttons before per-screen content
     // Tab content
     for (int s = 0; s < NUM_SCREENS; ++s) {
         html += "<div class='tab-content' id='tabcontent_" + String(s) + "' style='display:" + (s==0?"block":"none") + ";'>";
@@ -744,6 +758,7 @@ void handle_gauges_page() {
             html += "</div>"; // close icon-section
         }
         html += "</div>";
+        flushHtml(); // flush each screen tab
     }
     // Tab JS and Apply button (ensure inside form)
     html += "<div style='text-align:center; margin-top:16px;'><input type='submit' name='apply' value='Apply (no reboot)' style='padding:10px 24px; font-size:1.1em;'></div>";
@@ -796,7 +811,8 @@ void handle_gauges_page() {
     html += "});</script>";
     html += "<p style='text-align:center;'><a href='/'>Back</a></p>";
     html += "</div></body></html>";
-    config_server.send(200, "text/html", html);
+    flushHtml();
+    config_server.sendContent(""); // close chunked transfer
 }
 
 void handle_save_gauges() {

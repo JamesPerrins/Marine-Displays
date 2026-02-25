@@ -418,6 +418,31 @@ static void update_number_display_for_screen(int screen_num) {
         last_display_values[screen_idx] = display_value;
         last_display_units[screen_idx] = unit_str;
     }
+    
+    // Buzzer alarm check for Number display
+    // Low alarm: threshold in min[0][1], enable flag in buzzer[0][1]
+    // High alarm: threshold in max[0][2], enable flag in buzzer[0][2]
+    if (!isnan(display_value) && buzzer_mode != 0) {
+        extern uint16_t buzzer_cooldown_sec;
+        unsigned long ALERT_COOLDOWN_MS = (buzzer_cooldown_sec == 0) ? 0UL : (unsigned long)buzzer_cooldown_sec * 1000UL;
+        unsigned long now_buz = millis();
+        bool cooldown_ok = (now_buz - last_buzzer_time > ALERT_COOLDOWN_MS);
+        bool low_armed  = (screen_configs[screen_idx].buzzer[0][1] != 0);
+        bool high_armed = (screen_configs[screen_idx].buzzer[0][2] != 0);
+        float low_thresh  = screen_configs[screen_idx].min[0][1];
+        float high_thresh = screen_configs[screen_idx].max[0][2];
+        bool low_fired  = low_armed  && (display_value < low_thresh);
+        bool high_fired = high_armed && (display_value > high_thresh);
+        if ((low_fired || high_fired) && (first_run_buzzer || cooldown_ok)) {
+            Serial.printf("[ALARM] screen=%d number=%.2f low=%s(%.2f) high=%s(%.2f)\n",
+                screen_idx, display_value,
+                low_fired  ? "TRIP" : "ok", low_thresh,
+                high_fired ? "TRIP" : "ok", high_thresh);
+            trigger_buzzer_alert();
+            last_buzzer_time = now_buz;
+            first_run_buzzer = false;
+        }
+    }
 }
 
 // Update dual number displays for the active screen using live Signal K sensor values
@@ -934,6 +959,19 @@ void setup() {
     // Immediate hardware UART0 marker - visible on CH343 even before USB CDC comes up
     ets_printf("\r\n\r\n*** SETUP() START ***\r\n");
 
+    // CRITICAL: silence the buzzer ASAP.
+    // TCA9554 powers up with CONFIG=0xFF (all inputs). PIN6 (BEE_EN) floating HIGH-Z
+    // causes R18 (4.7kΩ) to win over the internal pullup → Q1 OFF → Q7 ON → buzzer ON
+    // immediately at hardware power-on. Init I2C and set all pins to OUTPUT with PIN6 HIGH
+    // before Serial.begin / delays so the buzzer is silenced within ~20ms of boot.
+    I2C_Init();
+    delay(10); // let Wire bus settle before I2C transactions
+    // Write OUTPUT register first (PIN6 HIGH = buzzer OFF) BEFORE switching CONFIG to output,
+    // so there is no glitch-LOW when the pin transitions from high-Z to driven.
+    Set_EXIOS(0xDF);             // output latch: PIN6 LOW (bit5=0, 0xDF=11011111) = buzzer OFF
+    TCA9554PWR_Init(0x00);       // CONFIG = all outputs → buzzer line now actively driven LOW
+    ets_printf("*** Buzzer silenced at boot ***\r\n");
+
     // Serial for debugging - with timeout
     Serial.setTxTimeoutMs(0);  // Non-blocking serial
     Serial.begin(115200);
@@ -943,12 +981,8 @@ void setup() {
     Serial.println("\n\n=== ESP32 Round Display Starting ===");
     Serial.flush();
     
-    // I2C and IO expander
-    ets_printf("*** I2C_Init start ***\r\n");
-    I2C_Init();
-    delay(100);
-    TCA9554PWR_Init(0x00);
-    Set_EXIO(EXIO_PIN6, Low);    // Start with buzzer OFF (board uses EXIO_PIN6)
+    // I2C and IO expander already initialized above; re-assert buzzer OFF after delay
+    Set_EXIO(EXIO_PIN6, Low);    // re-assert buzzer OFF (active-HIGH: Low=off, High=on)
     ets_printf("*** I2C+expander done ***\r\n");
     Serial.println("I2C and IO expander initialized");
     Serial.flush();
@@ -988,6 +1022,11 @@ void setup() {
     ets_printf("*** LCD_Init start ***\r\n");
     LCD_Init();
     ets_printf("*** LCD_Init done ***\r\n");
+    // LCD_Init calls esp_io_expander_new_i2c_tca9554 which resets CONFIG=0xFF (all inputs).
+    // Re-assert PIN6 LOW (buzzer OFF) and all-outputs immediately after display init.
+    Set_EXIOS(Read_EXIOS(TCA9554_OUTPUT_REG) & (uint8_t)~(1 << (EXIO_PIN6 - 1)));
+    Mode_EXIOS(0x00);
+    Set_EXIO(EXIO_PIN6, Low);
 
     // Stage 3: Full SD re-init now that the display has finished taking the SPI pins
     Serial.println("SD: now performing SD_MMC.begin('/sdcard', true) after display init");
@@ -1220,6 +1259,10 @@ void loop() {
             for (int g = 0; g < 2; ++g) {
                 lv_obj_t* icon = icons[g];
                 if (icon == NULL) continue;
+                // Only apply gauge zone logic for gauge-type screens
+                // (number/dual/quad/graph screens use their own alarm checks)
+                if (screen_configs[screen_idx].display_type != DISPLAY_TYPE_GAUGE &&
+                    screen_configs[screen_idx].display_type != DISPLAY_TYPE_GAUGE_NUMBER) continue;
 
                 float val = runtime_val[g];
                 int chosen_zone = -1;
@@ -1277,6 +1320,9 @@ void loop() {
                     for (int s = 0; s < NUM_SCREENS && !fired; ++s) {
                         // For each gauge on screen s
                         for (int g = 0; g < 2 && !fired; ++g) {
+                            // Only check gauge zones for gauge-type screens
+                            if (screen_configs[s].display_type != DISPLAY_TYPE_GAUGE &&
+                                screen_configs[s].display_type != DISPLAY_TYPE_GAUGE_NUMBER) continue;
                             // Get runtime value for that screen/gauge
                             float rval = NAN;
                             switch (s+1) {
@@ -1317,6 +1363,23 @@ void loop() {
                                 break;
                             }
                         }
+                        // Also check number display alarms for this screen (inside s loop, so s is in scope)
+                        if (!fired && screen_configs[s].display_type == DISPLAY_TYPE_NUMBER) {
+                            String npath = String(screen_configs[s].number_path);
+                            if (npath.length() > 0) {
+                                float nval = get_sensor_value_by_path(npath);
+                                if (!isnan(nval)) {
+                                    bool low_trip  = screen_configs[s].buzzer[0][1] && (nval < screen_configs[s].min[0][1]);
+                                    bool high_trip = screen_configs[s].buzzer[0][2] && (nval > screen_configs[s].max[0][2]);
+                                    if (low_trip || high_trip) {
+                                        trigger_buzzer_alert();
+                                        last_buzzer_time = now;
+                                        first_run_buzzer = false;
+                                        fired = true;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1324,6 +1387,21 @@ void loop() {
     }
     
     Lvgl_Loop();
+
+    // Maintain TCA9554 PIN6 LOW (buzzer OFF, active-HIGH circuit) every 50ms.
+    // esp_io_expander_new_i2c_tca9554 resets CONFIG=0xFF (all inputs) during LCD_Init;
+    // when PIN6 is high-Z the pull-up circuit turns the buzzer ON.
+    // This loop unconditionally re-asserts all-outputs with PIN6 LOW.
+    {
+        static unsigned long last_buz_maintain = 0;
+        unsigned long now_m = millis();
+        if (now_m - last_buz_maintain >= 50) {
+            last_buz_maintain = now_m;
+            // Clear PIN6 bit (bit5) in OUTPUT register, then assert all-outputs
+            Set_EXIOS(Read_EXIOS(TCA9554_OUTPUT_REG) & (uint8_t)~(1 << (EXIO_PIN6 - 1)));
+            Mode_EXIOS(0x00);
+        }
+    }
 
     // Small delay to prevent excessive loop iterations
     delay(1);

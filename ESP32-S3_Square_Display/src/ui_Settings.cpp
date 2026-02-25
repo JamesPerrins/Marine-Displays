@@ -37,23 +37,29 @@ static lv_timer_t *settings_refresh_timer = NULL;
 int buzzer_mode = 0;
 uint16_t buzzer_cooldown_sec = 60; // default 60s
 
-// Buzzer alert function - makes two beeps
+// Buzzer alert function.
+// Circuit: PIN6 LOW -> Q1 off -> Q7 on -> buzzer ON  (active-LOW via NPN pair)
+//          PIN6 HIGH -> Q1 on -> Q7 off -> buzzer OFF
+// When TCA9554 CONFIG register resets to 0xFF (all inputs), PIN6 becomes high-Z.
+// R18 (4.7k) then pulls Q1 base LOW -> Q7 stays ON -> buzzer sounds continuously.
+// Fix: always force CONFIG=0x00 (all outputs) before AND after every beep.
 extern "C" void trigger_buzzer_alert() {
-    if (buzzer_mode == 0) return; // disabled
+    if (buzzer_mode == 0) return;
     printf("trigger_buzzer_alert() called, buzzer_mode=%d\n", buzzer_mode);
-    // First beep
-    printf("  -> beep 1 on\n");
-    Set_EXIO(EXIO_PIN6, High);
-    delay(100);
-    Set_EXIO(EXIO_PIN6, Low);
-    printf("  -> beep 1 off\n");
-    delay(100);
-    // Second beep
-    printf("  -> beep 2 on\n");
-    Set_EXIO(EXIO_PIN6, High);
-    delay(100);
-    Set_EXIO(EXIO_PIN6, Low);
-    printf("  -> beep 2 off\n");
+    // Write OUTPUT register with PIN6 HIGH *before* switching to output mode,
+    // then switch CONFIG to outputs. This prevents a glitch LOW if OUTPUT was 0x00.
+    Set_EXIOS(Read_EXIOS(TCA9554_OUTPUT_REG) & (uint8_t)~(1 << (EXIO_PIN6 - 1)));
+    Mode_EXIOS(0x00);
+    printf("  -> beep 1\n");
+    Set_EXIO(EXIO_PIN6, High);     // buzzer ON  (active-HIGH: High=on, Low=off)
+    ets_delay_us(200000);          // 200ms
+    Set_EXIO(EXIO_PIN6, Low);      // buzzer OFF
+    ets_delay_us(100000);          // 100ms gap
+    printf("  -> beep 2\n");
+    Set_EXIO(EXIO_PIN6, High);     // buzzer ON
+    ets_delay_us(200000);          // 200ms
+    Set_EXIO(EXIO_PIN6, Low);      // buzzer OFF
+    Mode_EXIOS(0x00);              // re-assert all outputs
 }
 
 // Event handler for buzzer dropdown

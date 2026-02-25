@@ -1,5 +1,7 @@
 #include "Display_ST7701.h"  
 #include "driver/ledc.h"
+// ets_printf writes to hardware UART0 (CH343) regardless of USB CDC config
+extern "C" int ets_printf(const char *fmt, ...);
 #include "drivers/lcd/port/esp_lcd_st7701_interface.h"
 #include "esp_lcd_panel_commands.h"
 #include "port/esp_io_expander.h"
@@ -47,17 +49,14 @@ void ST7701_Init()
       },
     },
     .data_width = ESP_PANEL_LCD_RGB_DATA_WIDTH,
-    .bits_per_pixel = ESP_PANEL_LCD_RGB_PIXEL_BITS,
-    /* Allocate framebuffers in PSRAM for RGB panel (use config macro) */
-    .num_fbs = ESP_PANEL_LCD_RGB_FRAME_BUF_NUM,
-    .bounce_buffer_size_px = ESP_PANEL_LCD_BOUNCE_BUF_SIZE,
+    /* NOTE: bits_per_pixel, num_fbs, bounce_buffer_size_px not available in this IDF version - tracked in local vars */
     .psram_trans_align = 64,
     .hsync_gpio_num = ESP_PANEL_LCD_PIN_NUM_RGB_HSYNC,
     .vsync_gpio_num = ESP_PANEL_LCD_PIN_NUM_RGB_VSYNC,
     .de_gpio_num = ESP_PANEL_LCD_PIN_NUM_RGB_DE,
     .pclk_gpio_num = ESP_PANEL_LCD_PIN_NUM_RGB_PCLK,
-    .disp_gpio_num = ESP_PANEL_LCD_PIN_NUM_RGB_DISP,
     .data_gpio_nums = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    .disp_gpio_num = ESP_PANEL_LCD_PIN_NUM_RGB_DISP,
   };
 
   // Arduino demo mapping (diagram labels are misleading - these are actually B0-B4, G0-G5, R0-R4)
@@ -83,16 +82,18 @@ void ST7701_Init()
   size_t free_internal_before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
   size_t free_spiram_before = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
 
-  size_t bytes_per_pixel = rgb_config.bits_per_pixel / 8;
-  size_t est_fb_bytes = (size_t)ESP_PANEL_LCD_WIDTH * (size_t)ESP_PANEL_LCD_HEIGHT * bytes_per_pixel * rgb_config.num_fbs;
+  // bits_per_pixel and num_fbs not in this IDF's esp_lcd_rgb_panel_config_t; track locally
+  size_t num_fbs = ESP_PANEL_LCD_RGB_FRAME_BUF_NUM;
+  size_t bytes_per_pixel = ESP_PANEL_LCD_RGB_PIXEL_BITS / 8;
+  size_t est_fb_bytes = (size_t)ESP_PANEL_LCD_WIDTH * (size_t)ESP_PANEL_LCD_HEIGHT * bytes_per_pixel * num_fbs;
 
   // Check whether PSRAM appears available at runtime (free_spiram_before>0).
   bool spiram_ok = (free_spiram_before > 0);
   if (!spiram_ok) {
     Serial.println("[DISPLAY] PSRAM not initialized at runtime — falling back to internal RAM for framebuffers");
     rgb_config.flags.fb_in_psram = false;
-    rgb_config.num_fbs = 1;
-    rgb_config.bounce_buffer_size_px = 0;
+    num_fbs = 1; // track locally; num_fbs not a field in this IDF version
+    // bounce_buffer_size_px not available in this IDF version
   } else {
     
     if (est_fb_bytes > free_spiram_before) {
@@ -225,6 +226,22 @@ void ST7701_Init()
   if (rxe != ESP_OK) {
     Serial.printf("[DISPLAY] esp_io_expander_new_i2c_tca9554 failed: %s\n", esp_err_to_name(rxe));
     io_expander = NULL; // continue, but 3-wire SPI requires an expander for CS
+  } else {
+    // CRITICAL: esp_io_expander_new_i2c_tca9554 resets the chip with DIR=0xFF (all inputs),
+    // which leaves PIN6 (BEE_EN) floating → R18 (4.7kΩ) pulls Q1 base LOW → Q7 ON → buzzer always ON.
+    // The 3-wire SPI driver reads the cached direction register (0xFF) and only clears the SPI pin
+    // bits when calling set_dir(), so every SPI transaction re-asserts PIN6 as input.
+    // Fix: set ALL 8 pins to OUTPUT now so the cached direction is 0x00. Every subsequent
+    // set_dir() call by the SPI driver will read 0x00 and write 0x00 back, keeping PIN6 as output.
+    esp_err_t dir_err = esp_io_expander_set_dir(io_expander, 0xFF, IO_EXPANDER_OUTPUT);
+    if (dir_err != ESP_OK) {
+      Serial.printf("[DISPLAY] io_expander set_dir all-OUTPUT failed: %s\n", esp_err_to_name(dir_err));
+    } else {
+      Serial.println("[DISPLAY] io_expander direction cache cleared to all-OUTPUT (PIN6/buzzer safe)");
+    }
+    // Also pre-load the output latch: PIN6 HIGH (buzzer OFF), others can be left at 0xFF default.
+    // This prevents a glitch-LOW on PIN6 between the set_dir and our TCA9554PWR_Init in setup().
+    esp_io_expander_set_level(io_expander, (1 << (EXIO_PIN6 - 1)), 0); // PIN6 LOW = buzzer OFF (active-HIGH circuit)
   }
 
   esp_lcd_panel_io_3wire_spi_config_t spi_cfg3 = {
@@ -244,7 +261,9 @@ void ST7701_Init()
     .flags = {.use_dc_bit = 1, .dc_zero_on_data = 1, .lsb_first = 0, .cs_high_active = 0, .del_keep_cs_inactive = 0},
   };
 
+  ets_printf("*** esp_lcd_new_panel_io_3wire_spi calling ***\r\n");
   esp_err_t rc = esp_lcd_new_panel_io_3wire_spi(&spi_cfg3, &ctrl_io);
+  ets_printf("*** 3wire_spi rc=%d ctrl_io=%p ***\r\n", (int)rc, ctrl_io);
   if (rc != ESP_OK || ctrl_io == NULL) {
     Serial.printf("[DISPLAY] esp_lcd_new_panel_io_3wire_spi failed: %s\n", esp_err_to_name(rc));
     // Fall back to creating RGB panel directly (previous behavior)
@@ -278,10 +297,12 @@ void ST7701_Init()
     dev_cfg.reset_gpio_num = -1; // reset handled via expander
     dev_cfg.vendor_config = &vendor_cfg;
     // Ensure device config reflects our RGB settings so vendor-aware init sees correct pixel format
-    dev_cfg.bits_per_pixel = rgb_config.bits_per_pixel;
-    dev_cfg.rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB; // Match Arduino demo exactly
+    dev_cfg.bits_per_pixel = ESP_PANEL_LCD_RGB_PIXEL_BITS;
+    dev_cfg.color_space = ESP_LCD_COLOR_SPACE_RGB; // Match Arduino demo exactly
 
+    ets_printf("*** esp_lcd_new_panel_st7701_rgb calling ***\r\n");
     rc = esp_lcd_new_panel_st7701_rgb(ctrl_io, &dev_cfg, &panel_handle);
+    ets_printf("*** st7701_rgb rc=%d panel=%p ***\r\n", (int)rc, panel_handle);
     if (rc != ESP_OK || panel_handle == NULL) {
       Serial.printf("[DISPLAY] esp_lcd_new_panel_st7701_rgb failed: %s\n", esp_err_to_name(rc));
       // Clean up ctrl_io
@@ -299,12 +320,12 @@ void ST7701_Init()
       }
       // Fallback panel created successfully - verify basic RGB mapping & pixel format
       Serial.println("[DISPLAY] Fallback RGB panel created - verifying rgb_config");
-      Serial.printf("[DISPLAY] rgb_config.bits_per_pixel=%d\n", rgb_config.bits_per_pixel);
+      Serial.printf("[DISPLAY] rgb_config bits_per_pixel (compile-time)=%d\n", (int)ESP_PANEL_LCD_RGB_PIXEL_BITS);
       Serial.print("[DISPLAY] rgb data_gpio_nums: ");
       for (int _i=0; _i<16; _i++) {
         Serial.printf("%d%s", rgb_config.data_gpio_nums[_i], _i==15 ? "\n" : ", ");
       }
-      if (rgb_config.bits_per_pixel != 16) Serial.println("[DISPLAY][WARN] rgb_config bits_per_pixel != 16");
+      if (ESP_PANEL_LCD_RGB_PIXEL_BITS != 16) Serial.println("[DISPLAY][WARN] rgb_config bits_per_pixel != 16");
     } else {
       Serial.println("[DISPLAY] esp_lcd_new_panel_st7701_rgb succeeded (vendor init should have run)");
 
@@ -366,18 +387,18 @@ void ST7701_Init()
 
         // Verify vendor_cfg/dev_cfg/rgb_config consistency now that panel is created via vendor init
         Serial.println("[DISPLAY] Verifying vendor-aware panel config & mapping...");
-        Serial.printf("[DISPLAY] dev_cfg.rgb_ele_order=%d bits_per_pixel=%d\n", dev_cfg.rgb_ele_order, dev_cfg.bits_per_pixel);
+        Serial.printf("[DISPLAY] dev_cfg.color_space=%d bits_per_pixel=%d\n", (int)dev_cfg.color_space, (int)dev_cfg.bits_per_pixel);
         if (vendor_cfg.rgb_config) {
-          Serial.printf("[DISPLAY] vendor rgb_config->bits_per_pixel=%d\n", vendor_cfg.rgb_config->bits_per_pixel);
+          Serial.printf("[DISPLAY] vendor rgb_config bits_per_pixel (compile-time)=%d\n", (int)ESP_PANEL_LCD_RGB_PIXEL_BITS);
           Serial.print("[DISPLAY] vendor data_gpio_nums: ");
           for (int _i=0; _i<16; _i++) {
             Serial.printf("%d%s", vendor_cfg.rgb_config->data_gpio_nums[_i], _i==15 ? "\n" : ", ");
           }
-          if (vendor_cfg.rgb_config->bits_per_pixel != 16) Serial.println("[DISPLAY][WARN] vendor rgb_config bits_per_pixel != 16");
+          if (ESP_PANEL_LCD_RGB_PIXEL_BITS != 16) Serial.println("[DISPLAY][WARN] vendor rgb_config bits_per_pixel != 16");
         } else {
           Serial.println("[DISPLAY][WARN] vendor_cfg.rgb_config is NULL");
         }
-        if (dev_cfg.rgb_ele_order != LCD_RGB_ELEMENT_ORDER_RGB || (vendor_cfg.rgb_config && vendor_cfg.rgb_config->bits_per_pixel != 16)) {
+        if (dev_cfg.color_space != ESP_LCD_COLOR_SPACE_RGB || ESP_PANEL_LCD_RGB_PIXEL_BITS != 16) {
           Serial.println("[DISPLAY][WARN] Expected RGB element order + 16bpp; double-check endianness / swaps in drivers & LVGL configuration");
         } else {
           Serial.println("[DISPLAY] Vendor-aware panel config looks consistent with little-endian RGB565 pipeline");
@@ -400,11 +421,8 @@ void ST7701_Init()
     }
   }
 
-  // Re-enable vsync callback to track timing
-  esp_lcd_rgb_panel_event_callbacks_t cbs = {
-    .on_vsync = example_on_vsync_event,
-  };
-  esp_lcd_rgb_panel_register_event_callbacks(panel_handle, &cbs, NULL);
+  // Note: esp_lcd_rgb_panel_event_callbacks_t / esp_lcd_rgb_panel_register_event_callbacks not
+  // available in this IDF version. Vsync tracking via register_event_callbacks omitted.
   esp_lcd_panel_reset(panel_handle);
   esp_lcd_panel_init(panel_handle);
 

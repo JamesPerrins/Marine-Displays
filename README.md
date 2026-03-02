@@ -21,4 +21,6 @@ Its all avilable for free here, try it, test, tell me what works.
 Video of the round display - Building Custom Marine Displays with ESP32 & SignalK (Gauges, Dynamic Icons & Alerts)
 https://youtu.be/d4MlVSbn_wI
 
+Video of the square display - DIY ESP32 Marine MFD – Square Multifunction Boat Display using SignalK Data https://youtu.be/FAPvdz6oN7A
+
 The Baileys

@@ -43,7 +43,7 @@ Save them on the SD card in a folder called `/assets`.
 
 On first boot, the display creates an SSID called ESP32-SquareDisplay with the password: 12345678 - Browse to 192.168.4.1 to configure your display. 
 
-Video coming soon of the whole feature set and setup.
+Here is a video of the device running the code and the different display options - DIY ESP32 Marine MFD – Square Multifunction Boat Display using SignalK Data https://youtu.be/FAPvdz6oN7A
 
 The Baileys
 

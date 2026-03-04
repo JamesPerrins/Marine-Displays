@@ -603,11 +603,20 @@ void handle_gauges_page() {
     config_server.send(200, "text/html; charset=utf-8", "");
     String html;
     html.reserve(4096);
-    // Lambda: send buffered html to client and clear the buffer.
+    // Lambda: send buffered html to client and fully release the String's internal buffer.
+    // Using String() + reserve() frees the oversized capacity block each time, preventing
+    // heap fragmentation.
+    // vTaskDelay(1) yields to FreeRTOS for 1ms so the WiFi/TCP stack can process keepalives
+    // and prevent the SK WebSocket ping from timing out during long page generation.
+    // NOTE: Do NOT use Arduino yield() here — it re-enters handleClient() mid-response and hangs.
+    extern void Lvgl_Loop(void); // keep display ticking during slow page generation
     auto flushHtml = [&]() {
         if (html.length() > 0) {
             config_server.sendContent(html);
-            html = "";
+            html = String(); // fully free internal buffer (not just set length=0)
+            html.reserve(4096);
+            Lvgl_Loop(); // tick LVGL so the display doesn't freeze during long page generation
+            vTaskDelay(1); // 1ms FreeRTOS yield — safe, does NOT re-enter handleClient()
         }
     };
     html = "<!DOCTYPE html><html><head>";
@@ -748,6 +757,7 @@ void handle_gauges_page() {
             html += "</div>";
 
             html += "</div>"; // close icon-section
+            flushHtml(); // flush after each gauge to keep heap usage bounded
         }
         html += "</div>";
         flushHtml(); // flush each screen tab
@@ -756,6 +766,7 @@ void handle_gauges_page() {
     html += "<div style='text-align:center; margin-top:16px;'><input type='submit' name='apply' value='Apply (no reboot)' style='padding:10px 24px; font-size:1.1em;'></div>";
     html += "</form>";
     // Now add the test buttons outside the main form
+    // Flush per-screen to stay within ~4KB chunks — 50 forms × ~350 chars ≈ 17KB total.
     for (int s = 0; s < NUM_SCREENS; ++s) {
         for (int g = 0; g < 2; ++g) {
             for (int p = 0; p < 5; ++p) {
@@ -767,7 +778,9 @@ void handle_gauges_page() {
                 html += "</form>";
             }
         }
+        flushHtml(); // flush after each screen's test forms (~10 forms at a time)
     }
+    flushHtml(); // flush before JavaScript block — JS alone can be 3-5KB
     html += "<script>function showScreenTab(idx){\n";
     html += "  for(var s=0;s<" + String(NUM_SCREENS) + ";++s){\n";
     html += "    var el = document.getElementById('tabcontent_'+s); if(el) el.style.display=(s==idx?'block':'none');\n";
@@ -778,6 +791,7 @@ void handle_gauges_page() {
     html += "  var hidden2 = document.getElementById('active_tab_toggle'); if(hidden2) hidden2.value = idx;\n";
     html += "  try{ history.replaceState && history.replaceState(null,null,'#tab'+idx); }catch(e){}\n";
     html += "}\n";
+    flushHtml(); // flush showScreenTab function before DOMContentLoaded block
     html += "document.addEventListener('DOMContentLoaded',function(){\n";
     html += "  var testMode = " + String(test_mode ? "true" : "false") + ";\n";
     html += "  for (var s = 0; s < " + String(NUM_SCREENS) + "; ++s) {\n";

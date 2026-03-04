@@ -218,8 +218,6 @@ extern "C" void reset_number_display_tracking(int screen_num) {
     last_display_values[screen_idx] = NAN;
     last_display_units[screen_idx] = "";
     last_display_descriptions[screen_idx] = "";
-    
-    Serial.printf("[MAIN] Reset number display tracking for screen %d\n", screen_idx);
 }
 
 // Force immediate update of number display (bypasses change detection)
@@ -271,9 +269,6 @@ extern "C" void force_update_number_display(int screen_num) {
     last_display_values[screen_idx] = display_value;
     last_display_units[screen_idx] = unit_str;
     last_display_descriptions[screen_idx] = description;
-    
-    Serial.printf("[MAIN] Force updated number display for screen %d: %.2f %s (%s)\n", 
-                  screen_idx, display_value, unit_str.c_str(), description.c_str());
 }
 
 // Update number display for the active screen using live Signal K sensor values
@@ -403,12 +398,6 @@ static void update_number_display_for_screen(int screen_num) {
             number_display_update(screen_idx, display_value, unit_str.c_str(), description.c_str());
         } else {
             number_display_update(screen_idx, 0.0f, unit_str.c_str(), description.c_str());
-        }
-        
-        // Log only when actually updating
-        if (sensor_idx >= 0) {
-            Serial.printf("[NUMBER_DISPLAY] Screen %d updated: %.2f %s (%s)\n", 
-                          screen_idx, display_value, unit_str.c_str(), description.c_str());
         }
         
         // Save current state
@@ -1235,10 +1224,6 @@ void loop() {
     if (gauge_is_setup_mode()) {
         int16_t top_angle = gauge_get_preview_top_angle();
         int16_t bottom_angle = gauge_get_preview_bottom_angle();
-        Serial.print("[DEBUG] Setup mode active. Preview angles: top=");
-        Serial.print(top_angle);
-        Serial.print(", bottom=");
-        Serial.println(bottom_angle);
         rotate_needle(top_angle);
         rotate_lower_needle(bottom_angle);
     } else if (use_demo_mode) {

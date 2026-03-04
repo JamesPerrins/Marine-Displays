@@ -202,6 +202,51 @@ uint16_t auto_scroll_sec = 0;
 // reflects the in-memory `screen_configs` we just updated instead of
 // reloading possibly-stale NVS values.
 static volatile bool skip_next_load_preferences = false;
+
+// Asset file lists — populated once at startup by scan_sd_assets().
+// Reusing these in handle_gauges_page() avoids a live SD scan during HTTP
+// handling, which causes SD/WiFi DMA contention on ESP32-S3 and drops the
+// SK WebSocket connection.
+static std::vector<String> g_iconFiles;
+static std::vector<String> g_bgFiles;
+
+static void scan_sd_assets() {
+    g_iconFiles.clear();
+    g_bgFiles.clear();
+    File root = SD_MMC.open("/assets");
+    if (root && root.isDirectory()) {
+        File file = root.openNextFile();
+        while (file) {
+            String fname = file.name();
+            file = root.openNextFile(); // advance before processing
+            if (fname.startsWith("._") || fname.startsWith("_")) continue;
+            String lname = fname;
+            lname.toLowerCase();
+            String fullPath = fname.startsWith("/assets/") ? fname : "/assets/" + fname;
+            if (lname.endsWith(".png"))      g_iconFiles.push_back(String("S:/") + fullPath);
+            else if (lname.endsWith(".bin")) g_bgFiles.push_back(String("S:/") + fullPath);
+        }
+    } else {
+        // POSIX fallback
+        DIR *d = opendir("/sdcard/assets");
+        if (d) {
+            struct dirent *entry;
+            while ((entry = readdir(d)) != NULL) {
+                const char *fname = entry->d_name;
+                if (!fname || fname[0] == '.') continue;
+                String sname = String(fname);
+                String lname = sname; lname.toLowerCase();
+                if (lname.startsWith("_")) continue;
+                String fullPath = "/assets/" + sname;
+                if (lname.endsWith(".png"))      g_iconFiles.push_back(String("S:/") + fullPath);
+                else if (lname.endsWith(".bin")) g_bgFiles.push_back(String("S:/") + fullPath);
+            }
+            closedir(d);
+        }
+    }
+    Serial.printf("[ASSET SCAN] Cached %u bg files, %u icon files\n",
+                  (unsigned)g_bgFiles.size(), (unsigned)g_iconFiles.size());
+}
 // Namespaces used for Preferences / NVS
 const char* SETTINGS_NAMESPACE = "settings";
 const char* PREF_NAMESPACE = "gaugeconfig";
@@ -220,7 +265,6 @@ extern "C" int ui_get_current_screen(void);
 extern "C" void ui_set_screen(int screen_num);
 
 void save_preferences() {
-    Serial.println("[DEBUG] Saving preferences...");
     preferences.end();
     if (!preferences.begin(SETTINGS_NAMESPACE, false)) {
         Serial.println("[ERROR] preferences.begin failed for settings namespace");
@@ -256,7 +300,6 @@ void save_preferences() {
             char key[32];
             snprintf(key, sizeof(key), "screen%d", s);
             esp_err_t err = nvs_set_blob(nvs_handle, key, &screen_configs[s], sizeof(ScreenConfig));
-            Serial.printf("[NVS SAVE] nvs_set_blob('%s', size=%u) -> %d\n", key, (unsigned)sizeof(ScreenConfig), err);
             if (err != ESP_OK) {
                 esp_err_t erase_err = nvs_erase_key(nvs_handle, key);
                 Serial.printf("[NVS SAVE] nvs_erase_key('%s') -> %d\n", key, erase_err);
@@ -280,12 +323,10 @@ void save_preferences() {
                 snprintf(key, sizeof(key), "screen%d.part%d", s, part);
                 size_t part_sz = ((part + 1) * CHUNK_SIZE > total) ? (total - part * CHUNK_SIZE) : CHUNK_SIZE;
                 esp_err_t perr = nvs_set_blob(nvs_handle, key, ((uint8_t *)&screen_configs[s]) + part * CHUNK_SIZE, part_sz);
-                Serial.printf("[NVS SAVE] nvs_set_blob('%s', size=%u) -> %d\n", key, (unsigned)part_sz, perr);
                 if (perr != ESP_OK) { parts_ok = false; break; }
             }
             if (parts_ok) {
                 any_nvs_ok = true;
-                Serial.printf("[NVS SAVE] Chunked write succeeded for screen%d (%d parts)\n", s, parts);
             }
         }
         nvs_commit(nvs_handle);
@@ -374,12 +415,6 @@ void save_preferences() {
         }
     }
 
-    // Debug: print signalk_paths content before SD/NVS operations
-    Serial.println("[DEBUG] signalk_paths before saving:");
-    for (int i = 0; i < NUM_SCREENS * 2; ++i) {
-        Serial.printf("[DEBUG] signalk_paths[%d] = '%s'\n", i, signalk_paths[i].c_str());
-    }
-
     if (!any_nvs_ok) {
         Serial.println("[SD SAVE] NVS blob writes failed; saving screen configs to SD as fallback...");
         if (!SD_MMC.exists("/config")) SD_MMC.mkdir("/config");
@@ -394,21 +429,6 @@ void save_preferences() {
         }
     }
 
-    // Verify settings namespace saved correctly (read back keys)
-    if (preferences.begin(SETTINGS_NAMESPACE, true)) {
-        Serial.println("[DEBUG] Verifying saved SignalK path keys in SETTINGS_NAMESPACE:");
-        for (int i = 0; i < NUM_SCREENS * 2; ++i) {
-            String key = String("skpath_") + i;
-            String v = preferences.getString(key.c_str(), "<missing>");
-            Serial.printf("[DEBUG] prefs[%s] = '%s'\n", key.c_str(), v.c_str());
-        }
-        preferences.end();
-    } else {
-        Serial.println("[DEBUG] preferences.begin(SETTINGS_NAMESPACE, true) failed for verification");
-    }
-    // Also print saved SSID/password from Preferences to verify
-    if (preferences.begin(SETTINGS_NAMESPACE, true)) {
-
     // Always write SignalK paths to SD as a fallback in case Preferences/NVS fails
     if (!SD_MMC.exists("/config")) SD_MMC.mkdir("/config");
     File spf = SD_MMC.open("/config/signalk_paths.txt", FILE_WRITE);
@@ -417,14 +437,8 @@ void save_preferences() {
             spf.println(signalk_paths[i]);
         }
         spf.close();
-        Serial.println("[SD SAVE] Wrote /config/signalk_paths.txt");
     } else {
         Serial.println("[SD SAVE] Failed to open /config/signalk_paths.txt for writing");
-    }
-        String vs = preferences.getString("ssid", "<missing>");
-        String vp = preferences.getString("password", "<missing>");
-        Serial.printf("[DEBUG] prefs saved SSID='%s' PASSWORD='%s'\n", vs.c_str(), vp.c_str());
-        preferences.end();
     }
 }
 
@@ -631,85 +645,33 @@ void load_preferences() {
 }
 
 void handle_gauges_page() {
-    // --- Scan SD card for available asset files and split into background and icon lists ---
-    std::vector<String> iconFiles; // only .png files for icons
-    std::vector<String> bgFiles;   // only .bin files for large backgrounds
-    {
-        File root = SD_MMC.open("/assets");
-        if (root && root.isDirectory()) {
-            File file = root.openNextFile();
-            while (file) {
-                String fname = file.name();
-                Serial.printf("[ASSET SCAN] Found file: %s\n", fname.c_str());
-                // Exclude macOS resource fork files (._ prefix)
-                if (fname.startsWith("._")) {
-                    file = root.openNextFile();
-                    continue;
-                }
-                String lname = fname;
-                lname.toLowerCase();
-                // sanitize filenames that start with underscore
-                if (lname.startsWith("_")) { file = root.openNextFile(); continue; }
-                // Always add /assets/ prefix if not present
-                String fullPath = fname;
-                if (!fname.startsWith("/assets/")) {
-                    fullPath = "/assets/" + fname;
-                }
-                if (lname.endsWith(".png")) {
-                    iconFiles.push_back(String("S:/") + fullPath);
-                } else if (lname.endsWith(".bin")) {
-                    bgFiles.push_back(String("S:/") + fullPath);
-                }
-                file = root.openNextFile();
-            }
-        } else {
-            // POSIX fallback: scan /sdcard/assets
-            DIR *d = opendir("/sdcard/assets");
-            if (d) {
-                struct dirent *entry;
-                while ((entry = readdir(d)) != NULL) {
-                    const char *fname = entry->d_name;
-                    if (!fname) continue;
-                    if (fname[0] == '.') continue;
-                    String sname = String(fname);
-                    String lname = sname;
-                    lname.toLowerCase();
-                    if (lname.startsWith("_")) continue;
-                    String fullPath = "/assets/" + sname;
-                    if (lname.endsWith(".png")) iconFiles.push_back(String("S:/") + fullPath);
-                    else if (lname.endsWith(".bin")) bgFiles.push_back(String("S:/") + fullPath);
-                }
-                closedir(d);
-            }
-        }
-    }
-    // --- End SD scan ---
-    // Reload config from storage unless a save just occurred — in that case
-    // prefer the in-memory `screen_configs` so the UI shows the recently-saved values.
-    if (!skip_next_load_preferences) {
-        load_preferences();
-    } else {
-        // consume the skip flag and keep current in-memory configs
-        skip_next_load_preferences = false;
-    }
-    Serial.println("[DEBUG] handle_gauges_page() - gauge_cal values sent to HTML:");
-    for (int s = 0; s < NUM_SCREENS; ++s) {
-        for (int g = 0; g < 2; ++g) {
-            for (int p = 0; p < 5; ++p) {
-                Serial.printf("[DEBUG] gauge_cal[%d][%d][%d]: angle=%d value=%.2f\n", s, g, p, gauge_cal[s][g][p].angle, gauge_cal[s][g][p].value);
-            }
-        }
-    }
+    // Use the asset file list cached at startup — avoids SD scan during
+    // HTTP handling which causes SD/WiFi DMA contention on ESP32-S3.
+    const std::vector<String>& iconFiles = g_iconFiles;
+    const std::vector<String>& bgFiles   = g_bgFiles;
+    // Use in-memory screen_configs directly — they are loaded at boot and
+    // updated after every save, so calling load_preferences() here is redundant
+    // and causes SD/WiFi DMA contention that drops the SK WebSocket.
+    skip_next_load_preferences = false; // consume flag if set
+    Serial.println("[GAUGES] handler entered");
     // Start chunked HTTP response immediately — avoids holding the whole page (~50KB) in RAM at once.
     config_server.setContentLength(CONTENT_LENGTH_UNKNOWN);
     config_server.send(200, "text/html; charset=utf-8", "");
+    Serial.println("[GAUGES] headers sent, building HTML");
     String html;
     html.reserve(4096);
-    // Lambda: send buffered html to client and clear the buffer.
+    // Lambda: send buffered html to client and fully release the String's internal buffer.
+    // Using String() + reserve() frees the oversized capacity block each time, preventing
+    // heap fragmentation.
+    // vTaskDelay(1) yields to FreeRTOS for 1ms so the WiFi/TCP stack can process keepalives
+    // and prevent the SK WebSocket ping from timing out during long page generation.
+    // NOTE: Do NOT use Arduino yield() here — it re-enters handleClient() mid-response and hangs.
     auto flushHtml = [&]() {
         if (html.length() > 0) {
             config_server.sendContent(html);
-            html = "";
+            html = String(); // fully free internal buffer (not just set length=0)
+            html.reserve(4096);
+            vTaskDelay(pdMS_TO_TICKS(5)); // yield to WiFi/TCP stack between chunks
         }
     };
     html = "<!DOCTYPE html><html><head>";
@@ -717,6 +679,7 @@ void handle_gauges_page() {
     html += STYLE;
     html += "<title>Gauge Calibration</title></head><body><div class='container'>";
     flushHtml(); // flush header + styles before body content
+    Serial.println("[GAUGES] style flushed, building body");
     extern bool test_mode;
     html += "<h2>Gauge Calibration</h2>";
     html += "<form method='POST' action='/toggle-test-mode' style='margin-bottom:16px;text-align:center;'>";
@@ -744,8 +707,11 @@ void handle_gauges_page() {
             html += "<button type='button' class='tab-btn' id='tabbtn_" + String(s) + "' onclick='(function(){ showScreenTab(" + String(s) + "); fetch(\"/set-screen?screen=" + String(screen_one_based) + "\", {method:\"GET\"}).catch(function(){ }); })()' style='margin:0 4px; padding:8px 16px; font-size:1em;'>Screen " + String(screen_one_based) + "</button>";
         }
     html += "</div>";
+    flushHtml(); // flush tab bar before heavy per-screen content
+    Serial.println("[GAUGES] tab bar flushed, starting per-screen loop");
     // Tab content
     for (int s = 0; s < NUM_SCREENS; ++s) {
+        Serial.printf("[GAUGES] building screen %d\n", s);
         html += "<div class='tab-content' id='tabcontent_" + String(s) + "' style='display:" + (s==0?"block":"none") + ";'>";
         html += "<h3>Screen " + String(s+1) + "</h3>";
         
@@ -842,6 +808,8 @@ void handle_gauges_page() {
         html += "</div>"; // End alarm box
         
         html += "</div>"; // End number display config
+        flushHtml();
+        Serial.printf("[GAUGES] screen %d number config flushed\n", s);
         
         // Dual display configuration container (shown when display_type is Dual)
         html += "<div id='dualconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == 2 ? "block" : "none") + ";'>";
@@ -924,6 +892,7 @@ void handle_gauges_page() {
         html += "</div>"; // End bottom alarm box
 
         html += "</div>"; // End dual display config
+        flushHtml();
         
         // Quad display configuration (hidden when display_type is not Quad)
         html += "<div id='quadconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == 3 ? "block" : "none") + ";'>";
@@ -965,11 +934,16 @@ void handle_gauges_page() {
         };
 
         addQuadrantHTML("tl", "Top-Left",     screen_configs[s].quad_tl_path, screen_configs[s].quad_tl_font_size, screen_configs[s].quad_tl_font_color, 0, 1, 2);
+        flushHtml();
         addQuadrantHTML("tr", "Top-Right",    screen_configs[s].quad_tr_path, screen_configs[s].quad_tr_font_size, screen_configs[s].quad_tr_font_color, 0, 3, 4);
+        flushHtml();
         addQuadrantHTML("bl", "Bottom-Left",  screen_configs[s].quad_bl_path, screen_configs[s].quad_bl_font_size, screen_configs[s].quad_bl_font_color, 1, 1, 2);
+        flushHtml();
         addQuadrantHTML("br", "Bottom-Right", screen_configs[s].quad_br_path, screen_configs[s].quad_br_font_size, screen_configs[s].quad_br_font_color, 1, 3, 4);
+        flushHtml();
 
         html += "</div>"; // End quad display config
+        flushHtml();
         
         // Gauge configuration container (hidden when display_type is Number)
         html += "<div id='gaugeconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == 0 ? "block" : "none") + ";'>";
@@ -1062,8 +1036,10 @@ void handle_gauges_page() {
             html += "</div>";
 
             html += "</div>"; // close icon-section
+            flushHtml(); // flush after each gauge (~3KB each)
         }
         html += "</div>"; // close gaugeconfig div
+        flushHtml();
         
         // Gauge + Number configuration (display_type == 4)
         html += "<div id='gaugenumconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == 4 ? "block" : "none") + ";'>";
@@ -1183,6 +1159,7 @@ void handle_gauges_page() {
         html += "</div>"; // End alarm box
 
         html += "</div>"; // close gaugenumconfig div
+        flushHtml();
         
         // Graph configuration (display_type == 5)
         html += "<div id='graphconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == 5 ? "block" : "none") + ";'>";
@@ -1248,6 +1225,7 @@ void handle_gauges_page() {
     html += "<div style='text-align:center; margin-top:16px;'><input type='submit' name='apply' value='Apply (no reboot)' style='padding:10px 24px; font-size:1.1em;'></div>";
     html += "</form>";
     // Now add the test buttons outside the main form
+    // Flush per-screen to stay within ~4KB chunks — 50 forms × ~350 chars ≈ 17KB total.
     for (int s = 0; s < NUM_SCREENS; ++s) {
         for (int g = 0; g < 2; ++g) {
             for (int p = 0; p < 5; ++p) {
@@ -1259,7 +1237,9 @@ void handle_gauges_page() {
                 html += "</form>";
             }
         }
+        flushHtml(); // flush after each screen's test forms (~10 forms at a time)
     }
+    flushHtml(); // flush before JavaScript block — JS alone can be 3-5KB
     html += "<script>function testGaugePoint(screen,gauge,point){\n";
     html += "  var angleInput = document.querySelector('input[name=\"angle_'+screen+'_'+gauge+'_'+point+'\"]');\n";
     html += "  var testAngle = document.getElementById('testangle_'+screen+'_'+gauge+'_'+point);\n";
@@ -1430,34 +1410,6 @@ void handle_gauges_page() {
 }
 
 void handle_save_gauges() {
-            // Debug: print all POSTed keys and values
-            Serial.println("[DEBUG] POSTED FORM KEYS AND VALUES:");
-            int nArgs = config_server.args();
-            for (int i = 0; i < nArgs; ++i) {
-                String key = config_server.argName(i);
-                String val = config_server.arg(i);
-                Serial.printf("[POST] %s = '%s'\n", key.c_str(), val.c_str());
-            }
-        Serial.println("[DEBUG] handle_save_gauges() POST values and gauge_cal after POST:");
-        for (int s = 0; s < NUM_SCREENS; ++s) {
-            for (int g = 0; g < 2; ++g) {
-                for (int p = 0; p < 5; ++p) {
-                    String angleKey = "angle_" + String(s) + "_" + String(g) + "_" + String(p);
-                    String valueKey = "value_" + String(s) + "_" + String(g) + "_" + String(p);
-                    Serial.printf("[DEBUG] POST: %s='%s', %s='%s'\n", angleKey.c_str(), config_server.arg(angleKey).c_str(), valueKey.c_str(), config_server.arg(valueKey).c_str());
-                    Serial.printf("[DEBUG] gauge_cal[%d][%d][%d]: angle=%d value=%.2f\n", s, g, p, gauge_cal[s][g][p].angle, gauge_cal[s][g][p].value);
-                }
-            }
-        }
-        Serial.println("[DEBUG] handle_gauges_page() - gauge_cal values sent to GUI:");
-        for (int s = 0; s < NUM_SCREENS; ++s) {
-            for (int g = 0; g < 2; ++g) {
-                for (int p = 0; p < 5; ++p) {
-                    Serial.printf("[DEBUG] gauge_cal[%d][%d][%d]: angle=%d value=%.2f\n", s, g, p, gauge_cal[s][g][p].angle, gauge_cal[s][g][p].value);
-                }
-            }
-        }
-    Serial.println("[DEBUG] handle_save_gauges() called");
     if (config_server.method() == HTTP_POST) {
         bool reboot_needed = false;
         for (int s = 0; s < NUM_SCREENS; ++s) {
@@ -1734,8 +1686,6 @@ void handle_save_gauges() {
                         String buzKey = "bzr" + String(s) + String(g) + String(i);
                         screen_configs[s].buzzer[g][i] = config_server.hasArg(buzKey) ? 1 : 0;
                     }
-                } else {
-                    Serial.printf("[DEBUG] Skipping zones for screen %d gauge %d (not in form)\n", s, g);
                 }
                 // Only process calibration data if the angle fields are actually in the form
                 // (gauges hidden by display type won't submit their fields)
@@ -1744,23 +1694,9 @@ void handle_save_gauges() {
                     for (int p = 0; p < 5; ++p) {
                         String angleKey = "angle_" + String(s) + "_" + String(g) + "_" + String(p);
                         String valueKey = "value_" + String(s) + "_" + String(g) + "_" + String(p);
-                        String angleStr = config_server.arg(angleKey);
-                        String valueStr = config_server.arg(valueKey);
-                        Serial.printf("[DEBUG] POST: %s='%s', %s='%s'\n", angleKey.c_str(), angleStr.c_str(), valueKey.c_str(), valueStr.c_str());
-                        gauge_cal[s][g][p].angle = angleStr.toInt();
-                        gauge_cal[s][g][p].value = valueStr.toFloat();
+                        gauge_cal[s][g][p].angle = config_server.arg(angleKey).toInt();
+                        gauge_cal[s][g][p].value = config_server.arg(valueKey).toFloat();
                     }
-                } else {
-                    Serial.printf("[DEBUG] Skipping calibration for screen %d gauge %d (not in form)\n", s, g);
-                }
-            }
-        }
-        // Print updated gauge_cal values before saving
-        Serial.println("[DEBUG] gauge_cal values after POST:");
-        for (int s = 0; s < NUM_SCREENS; ++s) {
-            for (int g = 0; g < 2; ++g) {
-                for (int p = 0; p < 5; ++p) {
-                    Serial.printf("[DEBUG] gauge_cal[%d][%d][%d]: angle=%d value=%.2f\n", s, g, p, gauge_cal[s][g][p].angle, gauge_cal[s][g][p].value);
                 }
             }
         }
@@ -1801,9 +1737,7 @@ void handle_save_gauges() {
             // still set skip flag so the page reflects in-memory state; we will not reboot
             skip_next_load_preferences = true;
         }
-        // Debug: print updated screen_configs including buzzer flags to verify checkboxes
-        Serial.println("[DEBUG] Screen configs after save (including buzzer flags):");
-        dump_screen_configs();
+
         
         // Try to apply visual changes at runtime (hot-update). If LVGL objects are not present
         // or the update fails, fall back to reboot to ensure a clean load.
@@ -2164,6 +2098,11 @@ void setup_network() {
     config_server.on("/nvs_test", HTTP_GET, handle_nvs_test);
     config_server.begin();
     Serial.println("[WebServer] Configuration web UI started on port 80");
+
+    // Cache the SD asset list now, before any HTTP requests arrive.
+    // This avoids running the SD scan inside the HTTP handler where SD/WiFi
+    // DMA contention on ESP32-S3 causes the SK WebSocket to drop.
+    scan_sd_assets();
 }
 
 bool is_wifi_connected() {
@@ -2340,19 +2279,21 @@ void handle_nvs_test() {
 
 // Assets manager: list files and show upload form
 void handle_assets_page() {
-    // Ensure assets dir exists (try SD_MMC, fall back to POSIX /sdcard)
-    if (!SD_MMC.exists("/assets")) {
-        SD_MMC.mkdir("/assets");
-        if (!SD_MMC.exists("/assets")) {
-            // Try POSIX mkdir on SDSPI VFS
-            struct stat st;
-            if (stat("/sdcard/assets", &st) != 0) {
-                int rc = mkdir("/sdcard/assets", 0755);
-                Serial.printf("[ASSETS] POSIX mkdir /sdcard/assets -> %d\n", rc);
-            }
+    // Use cached file list — avoids SD scan during HTTP handling (SD/WiFi DMA conflict).
+    // Merged icon + bg into a single list for display.
+    config_server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    config_server.send(200, "text/html; charset=utf-8", "");
+    String html;
+    html.reserve(4096);
+    auto flush = [&]() {
+        if (html.length() > 0) {
+            config_server.sendContent(html);
+            html = String();
+            html.reserve(4096);
+            vTaskDelay(pdMS_TO_TICKS(5));
         }
-    }
-    String html = "<!DOCTYPE html><html><head>";
+    };
+    html = "<!DOCTYPE html><html><head>";
     html += STYLE;
     html += "<title>Assets Manager</title></head><body><div class='container'>";
     html += "<div class='tab-content'>";
@@ -2362,51 +2303,29 @@ void handle_assets_page() {
     html += "<input type='file' name='file' accept='image/png,image/jpeg,image/bmp,image/gif'>";
     html += "<input type='submit' value='Upload' class='tab-btn'>";
     html += "</form></div>";
-
+    flush();
     html += "<h3>Files in /assets</h3>";
-    html += "<table class='file-table'><tr><th>Name</th><th>Size</th><th>Actions</th></tr>";
-    File root = SD_MMC.open("/assets");
-    if (root && root.isDirectory()) {
-        File file = root.openNextFile();
-        while (file) {
-            String fname = file.name();
-            // show basename
-            String bname = fname;
-            if (bname.startsWith("/assets/")) bname = bname.substring(8);
-            html += "<tr><td>" + bname + "</td><td class='file-size'>" + String(file.size()) + "</td>";
-            html += "<td class='file-actions'><form method='POST' action='/assets/delete'><input type='hidden' name='file' value='" + bname + "'>";
-            html += "<input type='submit' value='Delete' class='tab-btn' onclick='return confirm(\"Delete " + bname + "?\")'></form>";
-            html += " <a href='S:/" + fname + "' target='_blank' class='tab-btn' style='padding:6px 10px;text-decoration:none;'>Download</a></td></tr>";
-            file = root.openNextFile();
-        }
-    } else {
-        // POSIX fallback: list files under /sdcard/assets
-        DIR *d = opendir("/sdcard/assets");
-        if (d) {
-            struct dirent *entry;
-            while ((entry = readdir(d)) != NULL) {
-                const char *fname = entry->d_name;
-                if (!fname) continue;
-                if (fname[0] == '.') continue; // skip . and .. and hidden
-                String bname = String(fname);
-                // get file size via stat
-                char fullpath[256];
-                snprintf(fullpath, sizeof(fullpath), "/sdcard/assets/%s", fname);
-                struct stat st;
-                long fsz = 0;
-                if (stat(fullpath, &st) == 0) fsz = (long)st.st_size;
-                html += "<tr><td>" + bname + "</td><td class='file-size'>" + String(fsz) + "</td>";
-                html += "<td class='file-actions'><form method='POST' action='/assets/delete'><input type='hidden' name='file' value='" + bname + "'>";
-                html += "<input type='submit' value='Delete' class='tab-btn' onclick='return confirm(\"Delete " + bname + "?\")'></form>";
-                html += " <a href='S:/assets/" + bname + "' target='_blank' class='tab-btn' style='padding:6px 10px;text-decoration:none;'>Download</a></td></tr>";
-            }
-            closedir(d);
-        }
-    }
+    html += "<table class='file-table'><tr><th>Name</th><th>Actions</th></tr>";
+    // Use cached file list — no SD access during HTTP handling
+    auto addRow = [&](const String& path) {
+        // path is like "S://assets/foo.bin" — extract basename
+        String bname = path;
+        int sl = bname.lastIndexOf('/');
+        if (sl >= 0) bname = bname.substring(sl + 1);
+        String sdpath = String("/assets/") + bname;
+        html += "<tr><td>" + bname + "</td>";
+        html += "<td class='file-actions'><form method='POST' action='/assets/delete'><input type='hidden' name='file' value='" + bname + "'>";
+        html += "<input type='submit' value='Delete' class='tab-btn' onclick='return confirm(\"Delete " + bname + "?\")'></form>";
+        html += " <a href='S:" + sdpath + "' target='_blank' class='tab-btn' style='padding:6px 10px;text-decoration:none;'>Download</a></td></tr>";
+        flush();
+    };
+    for (const auto& f : g_bgFiles)   addRow(f);
+    for (const auto& f : g_iconFiles) addRow(f);
     html += "</table>";
     html += "<p style='text-align:center; margin-top:12px;'><a href='/'>Back</a></p>";
     html += "</div></div></body></html>";
-    config_server.send(200, "text/html", html);
+    flush();
+    config_server.sendContent(""); // terminate chunked transfer encoding
 }
 
 // Upload handler: called during multipart upload
@@ -2455,6 +2374,7 @@ void handle_assets_upload() {
 
 // Final POST handler after upload completes (redirect back)
 void handle_assets_upload_post() {
+    scan_sd_assets(); // refresh cached file list after new upload
     String html = "<!DOCTYPE html><html><head>";
     html += STYLE;
     html += "<title>Upload Complete</title></head><body><div class='container'>";
@@ -2476,6 +2396,7 @@ void handle_assets_delete() {
     if (SD_MMC.exists(path)) {
         bool ok = SD_MMC.remove(path);
         Serial.printf("[ASSETS] Delete %s -> %d\n", path.c_str(), ok);
+        scan_sd_assets(); // refresh cached file list after delete
     }
     // redirect back
     config_server.sendHeader("Location", "/assets");

@@ -49,7 +49,7 @@ static unsigned long next_reconnect_at = 0;
 static unsigned long current_backoff_ms = 2000; // start 2s
 static const unsigned long RECONNECT_BASE_MS = 2000;
 static const unsigned long RECONNECT_MAX_MS = 60000;
-static const unsigned long MESSAGE_TIMEOUT_MS = 30000; // 30s without messages => reconnect
+static const unsigned long MESSAGE_TIMEOUT_MS = 120000; // 120s without messages => reconnect (long enough for web page generation)
 static const unsigned long PING_INTERVAL_MS = 15000; // send periodic ping
 
 // Outgoing message queue (simple ring buffer)
@@ -240,15 +240,12 @@ static void fetch_metadata_for_path(int index, const String &path) {
     HTTPClient http;
     String url = "http://" + server_ip_str + ":" + String(server_port_num) + "/signalk/v1/api/vessels/self/" + rest_path;
     
-    Serial.printf("[SIGNALK] Fetching metadata from: %s\n", url.c_str());
-    
     http.begin(url);
     http.setTimeout(5000);
     int httpCode = http.GET();
     
     if (httpCode == HTTP_CODE_OK) {
         String payload = http.getString();
-        Serial.printf("[SIGNALK] REST response (%d bytes): %s\n", payload.length(), payload.substring(0, min(300, (int)payload.length())).c_str());
         
         DynamicJsonDocument doc(2048);
         DeserializationError err = deserializeJson(doc, payload);
@@ -269,13 +266,8 @@ static void fetch_metadata_for_path(int index, const String &path) {
                 
                 if (unit || description) {
                     set_sensor_metadata(index, unit, description);
-                    Serial.printf("[SIGNALK] Stored metadata for [%d] %s: unit='%s', desc='%s'\n", 
-                                  index, path.c_str(), unit ? unit : "", description ? description : "");
-                } else {
-                    Serial.printf("[SIGNALK] No units or description in meta for %s\n", path.c_str());
                 }
             } else {
-                Serial.printf("[SIGNALK] No 'meta' field in REST response for %s\n", path.c_str());
             }
         } else {
             Serial.printf("[SIGNALK] JSON parse error for %s: %s\n", path.c_str(), err.c_str());
@@ -289,8 +281,6 @@ static void fetch_metadata_for_path(int index, const String &path) {
 
 // Fetch metadata for all configured paths (gauges, number displays, dual displays)
 void fetch_all_metadata() {
-    Serial.println("[SIGNALK] Fetching metadata for all configured paths...");
-    
     // Fetch for gauge paths (stored by index)
     for (int i = 0; i < TOTAL_PARAMS; i++) {
         if (signalk_paths[i].length() > 0) {
@@ -315,8 +305,6 @@ void fetch_all_metadata() {
         
         if (!in_gauge) {
             // Fetch metadata and store in extended map
-            Serial.printf("[SIGNALK] Fetching extended metadata for: %s\\n", path.c_str());
-            
             String api_path = path;
             api_path.replace('.', '/');
             String url = "http://" + server_ip_str + ":" + String(server_port_num) + 
@@ -341,8 +329,6 @@ void fetch_all_metadata() {
                         if (unit.length() > 0) extended_sensor_units[path] = unit;
                         if (description.length() > 0) extended_sensor_descriptions[path] = description;
                         xSemaphoreGive(sensor_mutex);
-                        Serial.printf("[SIGNALK] Extended metadata for %s: unit='%s', desc='%s'\n", 
-                                      path.c_str(), unit.c_str(), description.c_str());
                     }
                 }
             }
@@ -350,8 +336,6 @@ void fetch_all_metadata() {
             vTaskDelay(pdMS_TO_TICKS(100));
         }
     }
-    
-    Serial.println("[SIGNALK] Metadata fetch complete");
 }
 
 // Initialize mutex
@@ -442,7 +426,6 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
     // handle pong or ping responses if available
     if (type == WStype_PONG) {
         last_message_time = millis();
-        Serial.println("Signal K: received PONG");
     }
 }
 
@@ -461,7 +444,6 @@ static void signalk_task(void *parameter) {
         if (ws_client.isConnected()) {
             if (now - last_message_time >= PING_INTERVAL_MS) {
                 ws_client.sendPing();
-                Serial.println("Signal K: sent PING");
             }
         }
 
@@ -522,14 +504,6 @@ void enable_signalk(const char* ssid, const char* password, const char* server_i
         signalk_paths[i] = get_signalk_path_by_index(i);
     }
     
-    // Log all unique paths that will be subscribed
-    Serial.printf("=== Signal K: %d unique paths to subscribe ===\n", all_paths.size());
-    for (size_t i = 0; i < all_paths.size(); i++) {
-        Serial.printf("  [%d] %s\n", i, all_paths[i].c_str());
-    }
-    
-    Serial.println("=== Signal K paths loaded from configuration ===");
-    
     // Initialize mutex first
     init_sensor_mutex();
     // create ws queue mutex
@@ -588,7 +562,6 @@ void refresh_signalk_subscriptions() {
     
     // Get all unique paths including number and dual displays
     std::vector<String> all_paths = get_all_signalk_paths();
-    Serial.printf("[SignalK] Refreshing subscriptions for %d unique paths\n", all_paths.size());
 
     // Build subscription JSON
     DynamicJsonDocument subdoc(2048);  // Increased size to accommodate more paths
@@ -599,7 +572,6 @@ void refresh_signalk_subscriptions() {
             JsonObject s = subs.createNestedObject();
             s["path"] = path;
             s["period"] = 0;
-            Serial.printf("  - Subscribing to: %s\n", path.c_str());
         }
     }
     String out;
@@ -608,7 +580,6 @@ void refresh_signalk_subscriptions() {
     // If connected, send; otherwise queue for later flush
     if (ws_client.isConnected()) {
         ws_client.sendTXT(out);
-        Serial.println("[SignalK] Sent refreshed subscription payload");
     } else {
         if (enqueue_outgoing(out)) {
             Serial.println("[SignalK] WS not connected - subscription payload queued");

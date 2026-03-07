@@ -22,7 +22,9 @@ typedef enum {
 	DISPLAY_TYPE_DUAL = 2,        // Dual number display (top and bottom)
 	DISPLAY_TYPE_QUAD = 3,        // Quad number display (4 quadrants)
 	DISPLAY_TYPE_GAUGE_NUMBER = 4,// Gauge (top) + Number (center)
-	DISPLAY_TYPE_GRAPH = 5        // LVGL chart/graph display
+        DISPLAY_TYPE_GRAPH = 5,       // LVGL chart/graph display
+        DISPLAY_TYPE_COMPASS = 6,     // Rotating compass display (heading)
+        DISPLAY_TYPE_POSITION = 7     // Lat/Lon + UTC time display
 } DisplayType;
 
 // Number display background type (uses bg_image field)
@@ -101,6 +103,10 @@ typedef struct {
 	uint8_t graph_time_range;         // GraphTimeRange for graph time window
 	char graph_path_2[128];           // Signal K path for second graph series
 	char graph_color_2[8];            // Hex color for second graph series
+	// Position & Time display colours
+	char pos_latlon_color[8];         // #RRGGBB for lat/lon value text
+	char pos_time_color[8];           // #RRGGBB for time label text
+	char pos_divider_color[8];        // #RRGGBB for divider lines
 	// Add more fields as needed
 } __attribute__((packed)) ScreenConfig;
 

@@ -85,6 +85,10 @@ void ui_next_screen(void)
     if (next) {
         // Invalidate all cached images before switching screens to prevent stale images
         lv_img_cache_invalidate_src(NULL);
+        // Force full re-render of the incoming screen: objects created on inactive
+        // screens may have had their dirty flags consumed without actually being
+        // rendered, so we must re-mark the whole screen dirty before the animation.
+        lv_obj_invalidate(next);
         lv_scr_load_anim(next, LV_SCR_LOAD_ANIM_MOVE_LEFT, 300, 0, false);
         // Defer needle updates to the main loop (runs every 100ms)
         // Calling update_needles_for_screen() here raced with LVGL screen
@@ -109,6 +113,8 @@ void ui_prev_screen(void)
     if (prev) {
         // Invalidate all cached images before switching screens to prevent stale images
         lv_img_cache_invalidate_src(NULL);
+        // Force full re-render of the incoming screen (same reason as ui_next_screen)
+        lv_obj_invalidate(prev);
         lv_scr_load_anim(prev, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 300, 0, false);
         // Defer needle updates to the main loop (runs every 100ms)
         // Calling update_needles_for_screen() here raced with LVGL screen
@@ -130,6 +136,7 @@ void ui_set_screen(int screen_num)
 
     if (target) {
         lv_img_cache_invalidate_src(NULL);
+        lv_obj_invalidate(target);
         lv_scr_load_anim(target, LV_SCR_LOAD_ANIM_NONE, 200, 0, false);
     }
 }

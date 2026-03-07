@@ -6,6 +6,7 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <esp_system.h>
+#include "esp_task_wdt.h"
 #include <map>
 
 // Global array to hold all sensor values (10 parameters)
@@ -28,6 +29,11 @@ SemaphoreHandle_t sensor_mutex = NULL;
 // Metadata storage for each parameter
 String g_sensor_units[TOTAL_PARAMS];
 String g_sensor_descriptions[TOTAL_PARAMS];
+
+// Navigation globals for POSITION/COMPASS display types
+volatile float g_nav_latitude  = NAN;
+volatile float g_nav_longitude = NAN;
+char g_nav_datetime[32]        = {0};
 
 // Extended storage for paths beyond the gauge array (number displays, dual displays)
 static std::map<String, float> extended_sensor_values;
@@ -158,8 +164,6 @@ void set_sensor_metadata(int index, const char* unit, const char* description) {
         if (unit) g_sensor_units[index] = String(unit);
         if (description) g_sensor_descriptions[index] = String(description);
         xSemaphoreGive(sensor_mutex);
-        Serial.printf("[SIGNALK] Metadata for param[%d]: unit='%s', desc='%s'\n", 
-                      index, unit ? unit : "?", description ? description : "?");
     }
 }
 
@@ -240,8 +244,9 @@ static void fetch_metadata_for_path(int index, const String &path) {
     HTTPClient http;
     String url = "http://" + server_ip_str + ":" + String(server_port_num) + "/signalk/v1/api/vessels/self/" + rest_path;
     
+    esp_task_wdt_reset(); // prevent WDT during HTTP fetch
     http.begin(url);
-    http.setTimeout(5000);
+    http.setTimeout(1500); // 1.5s — fast LAN; long enough for SK, short enough to avoid WDT
     int httpCode = http.GET();
     
     if (httpCode == HTTP_CODE_OK) {
@@ -284,8 +289,9 @@ void fetch_all_metadata() {
     // Fetch for gauge paths (stored by index)
     for (int i = 0; i < TOTAL_PARAMS; i++) {
         if (signalk_paths[i].length() > 0) {
+            esp_task_wdt_reset(); // prevent WDT across multi-path loop
             fetch_metadata_for_path(i, signalk_paths[i]);
-            vTaskDelay(pdMS_TO_TICKS(100)); // Small delay between requests
+            vTaskDelay(pdMS_TO_TICKS(50)); // Small delay between requests
         }
     }
     
@@ -310,8 +316,9 @@ void fetch_all_metadata() {
             String url = "http://" + server_ip_str + ":" + String(server_port_num) + 
                          "/signalk/v1/api/vessels/self/" + api_path;
             
+            esp_task_wdt_reset(); // prevent WDT across multi-path loop
             HTTPClient http;
-            http.setTimeout(5000);
+            http.setTimeout(1500);
             http.begin(url);
             int httpCode = http.GET();
             
@@ -333,7 +340,7 @@ void fetch_all_metadata() {
                 }
             }
             http.end();
-            vTaskDelay(pdMS_TO_TICKS(100));
+            vTaskDelay(pdMS_TO_TICKS(50));
         }
     }
 }
@@ -396,6 +403,23 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
                 for (JsonVariant val : values) {
                     if (!val.containsKey("path") || !val.containsKey("value")) continue;
                     const char* path = val["path"];
+
+                    // navigation.position arrives as a JSON object {latitude,longitude}
+                    if (strcmp(path, "navigation.position") == 0) {
+                        if (val["value"].is<JsonObject>()) {
+                            JsonObject pos = val["value"].as<JsonObject>();
+                            if (pos.containsKey("latitude"))  g_nav_latitude  = pos["latitude"].as<float>();
+                            if (pos.containsKey("longitude")) g_nav_longitude = pos["longitude"].as<float>();
+                        }
+                        continue;
+                    }
+                    // navigation.datetime arrives as an ISO-8601 string
+                    if (strcmp(path, "navigation.datetime") == 0) {
+                        const char* dt = val["value"].as<const char*>();
+                        if (dt) strncpy(g_nav_datetime, dt, 31);
+                        continue;
+                    }
+
                     float value = val["value"].as<float>();
                     
                     // Check if this path matches any gauge path
@@ -404,12 +428,6 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
                         if (signalk_paths[i].length() > 0 && signalk_paths[i].equals(path)) {
                             set_sensor_value(i, value);
                             found_in_gauge = true;
-                            // Reduced logging - only log every 20th update
-                            static int log_counter = 0;
-                            if (++log_counter >= 20) {
-                                Serial.printf("WS Path[%d]: %.2f\n", i, value);
-                                log_counter = 0;
-                            }
                             // Don't break - continue to update ALL matching path indices
                         }
                     }
@@ -437,6 +455,9 @@ static void signalk_task(void *parameter) {
 
     while (signalk_enabled) {
         ws_client.loop();
+        // Drain any messages queued from other tasks (e.g. refresh_signalk_subscriptions
+        // called from the HTTP handler on Core 1). Only safe to call sendTXT() from here.
+        flush_outgoing();
 
         unsigned long now = millis();
 
@@ -466,7 +487,6 @@ static void signalk_task(void *parameter) {
                 next_reconnect_at = now + current_backoff_ms;
             }
             if (now >= next_reconnect_at) {
-                Serial.println("Signal K: attempting reconnect...");
                 // re-init client
                 ws_client.begin(server_ip_str.c_str(), server_port_num, "/signalk/v1/stream");
                 ws_client.onEvent(wsEvent);
@@ -577,16 +597,12 @@ void refresh_signalk_subscriptions() {
     String out;
     serializeJson(subdoc, out);
 
-    // If connected, send; otherwise queue for later flush
-    if (ws_client.isConnected()) {
-        ws_client.sendTXT(out);
-    } else {
-        if (enqueue_outgoing(out)) {
-            Serial.println("[SignalK] WS not connected - subscription payload queued");
-        } else {
-            Serial.println("[SignalK] WS not connected - failed to queue subscription payload");
-        }
-    }
+    // Always queue — never call ws_client.sendTXT() directly here.
+    // refresh_signalk_subscriptions() may be called from Core 1 (HTTP handler)
+    // while signalk_task on Core 0 is inside ws_client.loop(). Calling sendTXT()
+    // from two cores simultaneously is an unprotected race that crashes the device.
+    // flush_outgoing() inside signalk_task will drain the queue safely from Core 0.
+    enqueue_outgoing(out);
 }
 
 

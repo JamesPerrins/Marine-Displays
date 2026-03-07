@@ -20,6 +20,8 @@ bool test_mode = false;
 #include "quad_number_display.h"
 #include "gauge_number_display.h"
 #include "graph_display.h"
+#include "position_display.h"
+#include "compass_display.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -30,6 +32,7 @@ void show_fallback_error_screen_if_needed();
 
 // Apply visuals at runtime (hot-update) helper from sensESP_setup
 bool apply_all_screen_visuals();
+bool apply_screen_visuals_for_one(int s);
 #include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
@@ -745,6 +748,17 @@ static void update_graph_display_for_screen(int screen_num) {
     // Get the configured Signal K path for the graph
     String graph_path = String(screen_configs[screen_idx].number_path);  // Reuse number_path field
     
+    // Diagnostic: log path and raw value for troubleshooting (once every 5s per screen)
+    static unsigned long last_graph_log[5] = {0, 0, 0, 0, 0};
+    unsigned long now_log = millis();
+    if (now_log - last_graph_log[screen_idx] > 5000) {
+        last_graph_log[screen_idx] = now_log;
+        float dbg = get_sensor_value_by_path(graph_path);
+        Serial.printf("[GRAPH] s=%d path1='%s' val=%.2f path2='%s'\n",
+            screen_idx, graph_path.c_str(), dbg,
+            screen_configs[screen_idx].graph_path_2);
+    }
+    
     // Helper lambda to get value and metadata for a path
     auto get_path_data = [](const String& path, float& value, String& unit, String& description) {
         if (path.length() == 0) {
@@ -840,6 +854,44 @@ extern "C" void update_needles_for_screen(int screen_num) {
     } else if (screen_configs[screen_idx].display_type == DISPLAY_TYPE_GRAPH) {
         // Graph display mode - show LVGL chart
         update_graph_display_for_screen(screen_num);
+        return;
+    } else if (screen_configs[screen_idx].display_type == DISPLAY_TYPE_POSITION) {
+        // Position display mode - show lat/lon and UTC time from SignalK
+        position_display_update(screen_idx,
+            (float)g_nav_latitude, (float)g_nav_longitude, g_nav_datetime);
+        return;
+    } else if (screen_configs[screen_idx].display_type == DISPLAY_TYPE_COMPASS) {
+        // Compass display — path holds navigation.headingMagnetic or headingTrue (radians)
+        String hdg_path = String(screen_configs[screen_idx].number_path);
+        if (hdg_path.length() == 0) hdg_path = "navigation.headingMagnetic";
+        float hdg_rad = get_sensor_value_by_path(hdg_path);
+        if (!isnan(hdg_rad)) {
+            float hdg_deg = hdg_rad * (180.0f / (float)M_PI);
+            bool is_true = (hdg_path.indexOf("True") >= 0 || hdg_path.indexOf("true") >= 0);
+            compass_display_update(screen_idx, hdg_deg, is_true ? 1 : 0);
+        }
+        // BL / BR extra data fields
+        auto compass_get_field = [](const String& path, float& val, String& unit, String& desc) {
+            if (path.length() == 0) { val = NAN; unit = ""; desc = ""; return; }
+            val  = get_sensor_value_by_path(path);
+            unit = get_sensor_unit_by_path(path);
+            desc = get_sensor_description_by_path(path);
+            if (!isnan(val)) {
+                if (unit == "K")     { val -= 273.15f;  unit = "°C"; }
+                else if (unit == "Pa")     { val /= 100000.0f; unit = "bar"; }
+                else if (unit == "ratio")  { val *= 100.0f;    unit = "%"; }
+                else if (unit == "Hz")     { val *= 60.0f;     unit = "RPM"; }
+                else if (unit == "m/s")    { val *= 1.94384f;  unit = "kn"; }
+                else if (unit == "rad")    { val *= 57.2958f;  unit = "°"; }
+            }
+        };
+        String bl_path = String(screen_configs[screen_idx].quad_bl_path);
+        String br_path = String(screen_configs[screen_idx].quad_br_path);
+        float bl_val, br_val; String bl_unit, br_unit, bl_desc, br_desc;
+        compass_get_field(bl_path, bl_val, bl_unit, bl_desc);
+        compass_get_field(br_path, br_val, br_unit, br_desc);
+        compass_display_update_bl(screen_idx, bl_val, bl_unit.c_str(), bl_desc.c_str());
+        compass_display_update_br(screen_idx, br_val, br_unit.c_str(), br_desc.c_str());
         return;
     }
     
@@ -1262,6 +1314,15 @@ void loop() {
                 if (top_needle) needle_anim_cb(top_needle, last_top_angle[current_screen]);
                 if (bottom_needle) lower_needle_anim_cb(bottom_needle, last_bottom_angle[current_screen]);
                 last_seen_screen = current_screen;
+
+                // If a save happened while this screen was inactive, re-apply its visuals
+                // NOW while it is active so LVGL actually renders them.
+                int cs0 = current_screen - 1;
+                if (cs0 >= 0 && cs0 < 5 && g_screens_need_apply[cs0]) {
+                    g_screens_need_apply[cs0] = false;
+                    Serial.printf("[LOOP] lazy apply for screen %d\n", cs0);
+                    apply_screen_visuals_for_one(cs0);
+                }
             }
 
             update_needles_for_screen(current_screen);
@@ -1500,6 +1561,18 @@ void loop() {
         }
     }
     
+    // Deferred LVGL rebuild: HTTP save handlers set this flag instead of calling
+    // apply_all_screen_visuals() directly (which would race with DMA flush).
+    // We consume it here, just before lv_timer_handler(), when LVGL is idle.
+    if (g_pending_visual_apply) {
+        g_pending_visual_apply = false;
+        Serial.println("[LOOP] calling apply_all_screen_visuals");
+        Serial.flush();
+        apply_all_screen_visuals();
+        Serial.println("[LOOP] apply_all_screen_visuals returned");
+        Serial.flush();
+    }
+
     Lvgl_Loop();
 
     // Maintain TCA9554 PIN6 LOW (buzzer OFF, active-HIGH circuit) every 50ms.

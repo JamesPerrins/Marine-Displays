@@ -92,8 +92,12 @@ void graph_display_create(int screen_num) {
         lv_obj_clear_flag(bg_panels[screen_num], LV_OBJ_FLAG_CLICKABLE);
     }
     
-    // Get font color
+    // Get font color — used for series 1 line and axis labels
+    // If number_font_color is unset/black, fall back to green so the line is always visible
     lv_color_t font_color = hex_to_lv_color(cfg.number_font_color);
+    if (font_color.ch.red <= 1 && font_color.ch.green <= 2 && font_color.ch.blue <= 1) {
+        font_color = lv_color_make(0, 255, 0); // fallback: green
+    }
     
     // Create description label (top left corner)
     description_labels[screen_num] = lv_label_create(screen);
@@ -225,9 +229,6 @@ void graph_display_create(int screen_num) {
         lv_obj_align(unit_labels_2[screen_num], LV_ALIGN_BOTTOM_RIGHT, -10, -10);
         lv_obj_add_flag(unit_labels_2[screen_num], LV_OBJ_FLAG_IGNORE_LAYOUT);
     }
-    
-    Serial.printf("[GRAPH_DISPLAY] Created for screen %d (type=%d, series2=%d)\n", 
-                  screen_num, cfg.graph_chart_type, has_series_2 ? 1 : 0);
 }
 
 void graph_display_update(int screen_num, float value, const char* unit, const char* description,
@@ -299,13 +300,27 @@ void graph_display_update(int screen_num, float value, const char* unit, const c
             }
         }
         
-        // Add 10% margin to range for better visualization
+        // Add 10% margin to range for better visualization.
+        // Ensure minimum 1-unit margin so the chart is never set to [N, N]
+        // (which would truncate all data and render as a blank screen).
         float range = (float)(actual_max - actual_min);
-        if (range < 0.1f) range = 0.1f;  // Minimum range to avoid division by zero
         float margin = range * 0.1f;
+        if (margin < 1.0f) margin = 1.0f;   // ← floor: cast to int must give at least ±1
         int32_t y_min = (int32_t)((float)actual_min - margin);
         int32_t y_max = (int32_t)((float)actual_max + margin);
-        
+
+        // Diagnostic: log every 5s so we can see what the chart is actually doing
+        static unsigned long last_chart_log[5] = {0,0,0,0,0};
+        unsigned long now_cl = millis();
+        if (now_cl - last_chart_log[screen_num] > 5000) {
+            last_chart_log[screen_num] = now_cl;
+            Serial.printf("[CHART] s=%d val1=%.2f(->%d) val2=%.2f(->%d) actual=[%d,%d] range=[%d,%d]\n",
+                screen_num, value, (int)value,
+                isnan(value2) ? 0.0f : value2, has_series_2 ? (int)value2 : -999,
+                (int)actual_min, (int)actual_max, (int)y_min, (int)y_max);
+            Serial.flush();
+        }
+
         // Update Y-axis range
         lv_chart_set_range(graph_charts[screen_num], LV_CHART_AXIS_PRIMARY_Y, y_min, y_max);
         
@@ -331,7 +346,8 @@ void graph_display_destroy(int screen_num) {
     if (graph_charts[screen_num]) {
         lv_obj_del(graph_charts[screen_num]);
         graph_charts[screen_num] = NULL;
-        graph_series[screen_num] = NULL;  // Series is deleted with chart
+        graph_series[screen_num] = NULL;    // Series deleted with chart
+        graph_series_2[screen_num] = NULL;  // Series deleted with chart
     }
     
     if (unit_labels[screen_num]) {
@@ -342,6 +358,17 @@ void graph_display_destroy(int screen_num) {
     if (description_labels[screen_num]) {
         lv_obj_del(description_labels[screen_num]);
         description_labels[screen_num] = NULL;
+    }
+    
+    // These were missing — they are children of screen not chart, so survive chart deletion
+    if (unit_labels_2[screen_num]) {
+        lv_obj_del(unit_labels_2[screen_num]);
+        unit_labels_2[screen_num] = NULL;
+    }
+    
+    if (description_labels_2[screen_num]) {
+        lv_obj_del(description_labels_2[screen_num]);
+        description_labels_2[screen_num] = NULL;
     }
     
     if (y_min_labels[screen_num]) {

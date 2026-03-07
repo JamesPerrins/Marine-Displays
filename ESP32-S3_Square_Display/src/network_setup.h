@@ -22,6 +22,13 @@ void set_auto_scroll_interval(uint16_t sec);
 // Initialize network (WiFi + WebServer) with web UI for configuration
 void setup_network();
 
+// Set this flag from any context to request apply_all_screen_visuals() be called
+// safely from loop() on the next iteration, avoiding LVGL access from HTTP handlers.
+extern volatile bool g_pending_visual_apply;
+// Per-screen lazy re-apply flags: set when a save happens while the screen was
+// inactive; cleared when that screen becomes active and visuals are re-applied.
+extern volatile bool g_screens_need_apply[5];
+
 // Check if WiFi is connected
 bool is_wifi_connected();
 

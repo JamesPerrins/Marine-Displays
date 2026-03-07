@@ -134,9 +134,6 @@ void number_display_create(int screen_num) {
     lv_obj_align(number_labels[screen_num], LV_ALIGN_CENTER, 0, 0);
     lv_obj_add_flag(number_labels[screen_num], LV_OBJ_FLAG_IGNORE_LAYOUT);
     
-    Serial.printf("[NUMBER_DISPLAY] Applied zoom %d to label (font_size setting: %d)\n", 
-                  zoom_scale, cfg.number_font_size);
-    
     // Create unit label (bottom right corner) — height accommodates up to 72pt font
     unit_labels[screen_num] = lv_label_create(screen);
     lv_label_set_text(unit_labels[screen_num], "");
@@ -147,9 +144,6 @@ void number_display_create(int screen_num) {
     lv_obj_set_style_text_color(unit_labels[screen_num], font_color, 0);
     lv_obj_align(unit_labels[screen_num], LV_ALIGN_BOTTOM_RIGHT, -10, -10);
     lv_obj_add_flag(unit_labels[screen_num], LV_OBJ_FLAG_IGNORE_LAYOUT);
-    
-    Serial.printf("[NUMBER_DISPLAY] Created for screen %d (bg=%s, font_size=%d)\n", 
-                  screen_num, cfg.background_path, cfg.number_font_size);
 }
 
 void number_display_update(int screen_num, float value, const char* unit, const char* description) {

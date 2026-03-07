@@ -505,7 +505,7 @@ void load_preferences() {
                     bool valid = true;
                     for (int g = 0; g < 2 && valid; ++g) {
                         for (int p = 0; p < 5; ++p) {
-                            if (screen_configs[s].cal[g][p].angle < 0 || screen_configs[s].cal[g][p].angle > 360) {
+                            if (screen_configs[s].cal[g][p].angle < -360 || screen_configs[s].cal[g][p].angle > 360) {
                                 valid = false; break;
                             }
                         }
@@ -598,17 +598,31 @@ void handle_gauges_page() {
         // consume the skip flag and keep current in-memory configs
         skip_next_load_preferences = false;
     }
-    Serial.println("[DEBUG] handle_gauges_page() - gauge_cal values sent to HTML:");
-    for (int s = 0; s < NUM_SCREENS; ++s) {
-        for (int g = 0; g < 2; ++g) {
-            for (int p = 0; p < 5; ++p) {
-                Serial.printf("[DEBUG] gauge_cal[%d][%d][%d]: angle=%d value=%.2f\n", s, g, p, gauge_cal[s][g][p].angle, gauge_cal[s][g][p].value);
-            }
+    // Start chunked HTTP response immediately — avoids holding the whole page (~50KB) in RAM at once.
+    config_server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    config_server.send(200, "text/html; charset=utf-8", "");
+    String html;
+    html.reserve(4096);
+    // Lambda: send buffered html to client and fully release the String's internal buffer.
+    // Using String() + reserve() frees the oversized capacity block each time, preventing
+    // heap fragmentation.
+    // vTaskDelay(1) yields to FreeRTOS for 1ms so the WiFi/TCP stack can process keepalives
+    // and prevent the SK WebSocket ping from timing out during long page generation.
+    // NOTE: Do NOT use Arduino yield() here — it re-enters handleClient() mid-response and hangs.
+    extern void Lvgl_Loop(void); // keep display ticking during slow page generation
+    auto flushHtml = [&]() {
+        if (html.length() > 0) {
+            config_server.sendContent(html);
+            html = String(); // fully free internal buffer (not just set length=0)
+            html.reserve(4096);
+            Lvgl_Loop(); // tick LVGL so the display doesn't freeze during long page generation
+            vTaskDelay(1); // 1ms FreeRTOS yield — safe, does NOT re-enter handleClient()
         }
-    }
-    String html = "<!DOCTYPE html><html><head>";
+    };
+    html = "<!DOCTYPE html><html><head>";
     html += STYLE;
     html += "<title>Gauge Calibration</title></head><body><div class='container'>";
+    flushHtml(); // flush header + styles before body content
     extern bool test_mode;
     html += "<h2>Gauge Calibration</h2>";
     html += "<form method='POST' action='/toggle-test-mode' style='margin-bottom:16px;text-align:center;'>";
@@ -636,6 +650,7 @@ void handle_gauges_page() {
             html += "<button type='button' class='tab-btn' id='tabbtn_" + String(s) + "' onclick='(function(){ showScreenTab(" + String(s) + "); fetch(\"/set-screen?screen=" + String(screen_one_based) + "\", {method:\"GET\"}).catch(function(){ }); })()' style='margin:0 4px; padding:8px 16px; font-size:1em;'>Screen " + String(screen_one_based) + "</button>";
         }
     html += "</div>";
+    flushHtml(); // flush tab buttons before per-screen content
     // Tab content
     for (int s = 0; s < NUM_SCREENS; ++s) {
         html += "<div class='tab-content' id='tabcontent_" + String(s) + "' style='display:" + (s==0?"block":"none") + ";'>";
@@ -742,13 +757,16 @@ void handle_gauges_page() {
             html += "</div>";
 
             html += "</div>"; // close icon-section
+            flushHtml(); // flush after each gauge to keep heap usage bounded
         }
         html += "</div>";
+        flushHtml(); // flush each screen tab
     }
     // Tab JS and Apply button (ensure inside form)
     html += "<div style='text-align:center; margin-top:16px;'><input type='submit' name='apply' value='Apply (no reboot)' style='padding:10px 24px; font-size:1.1em;'></div>";
     html += "</form>";
     // Now add the test buttons outside the main form
+    // Flush per-screen to stay within ~4KB chunks — 50 forms × ~350 chars ≈ 17KB total.
     for (int s = 0; s < NUM_SCREENS; ++s) {
         for (int g = 0; g < 2; ++g) {
             for (int p = 0; p < 5; ++p) {
@@ -760,7 +778,9 @@ void handle_gauges_page() {
                 html += "</form>";
             }
         }
+        flushHtml(); // flush after each screen's test forms (~10 forms at a time)
     }
+    flushHtml(); // flush before JavaScript block — JS alone can be 3-5KB
     html += "<script>function showScreenTab(idx){\n";
     html += "  for(var s=0;s<" + String(NUM_SCREENS) + ";++s){\n";
     html += "    var el = document.getElementById('tabcontent_'+s); if(el) el.style.display=(s==idx?'block':'none');\n";
@@ -771,6 +791,7 @@ void handle_gauges_page() {
     html += "  var hidden2 = document.getElementById('active_tab_toggle'); if(hidden2) hidden2.value = idx;\n";
     html += "  try{ history.replaceState && history.replaceState(null,null,'#tab'+idx); }catch(e){}\n";
     html += "}\n";
+    flushHtml(); // flush showScreenTab function before DOMContentLoaded block
     html += "document.addEventListener('DOMContentLoaded',function(){\n";
     html += "  var testMode = " + String(test_mode ? "true" : "false") + ";\n";
     html += "  for (var s = 0; s < " + String(NUM_SCREENS) + "; ++s) {\n";
@@ -796,38 +817,11 @@ void handle_gauges_page() {
     html += "});</script>";
     html += "<p style='text-align:center;'><a href='/'>Back</a></p>";
     html += "</div></body></html>";
-    config_server.send(200, "text/html", html);
+    flushHtml();
+    config_server.sendContent(""); // close chunked transfer
 }
 
 void handle_save_gauges() {
-            // Debug: print all POSTed keys and values
-            Serial.println("[DEBUG] POSTED FORM KEYS AND VALUES:");
-            int nArgs = config_server.args();
-            for (int i = 0; i < nArgs; ++i) {
-                String key = config_server.argName(i);
-                String val = config_server.arg(i);
-                Serial.printf("[POST] %s = '%s'\n", key.c_str(), val.c_str());
-            }
-        Serial.println("[DEBUG] handle_save_gauges() POST values and gauge_cal after POST:");
-        for (int s = 0; s < NUM_SCREENS; ++s) {
-            for (int g = 0; g < 2; ++g) {
-                for (int p = 0; p < 5; ++p) {
-                    String angleKey = "angle_" + String(s) + "_" + String(g) + "_" + String(p);
-                    String valueKey = "value_" + String(s) + "_" + String(g) + "_" + String(p);
-                    Serial.printf("[DEBUG] POST: %s='%s', %s='%s'\n", angleKey.c_str(), config_server.arg(angleKey).c_str(), valueKey.c_str(), config_server.arg(valueKey).c_str());
-                    Serial.printf("[DEBUG] gauge_cal[%d][%d][%d]: angle=%d value=%.2f\n", s, g, p, gauge_cal[s][g][p].angle, gauge_cal[s][g][p].value);
-                }
-            }
-        }
-        Serial.println("[DEBUG] handle_gauges_page() - gauge_cal values sent to GUI:");
-        for (int s = 0; s < NUM_SCREENS; ++s) {
-            for (int g = 0; g < 2; ++g) {
-                for (int p = 0; p < 5; ++p) {
-                    Serial.printf("[DEBUG] gauge_cal[%d][%d][%d]: angle=%d value=%.2f\n", s, g, p, gauge_cal[s][g][p].angle, gauge_cal[s][g][p].value);
-                }
-            }
-        }
-    Serial.println("[DEBUG] handle_save_gauges() called");
     if (config_server.method() == HTTP_POST) {
         bool reboot_needed = false;
         for (int s = 0; s < NUM_SCREENS; ++s) {
@@ -890,20 +884,8 @@ void handle_save_gauges() {
                 for (int p = 0; p < 5; ++p) {
                     String angleKey = "angle_" + String(s) + "_" + String(g) + "_" + String(p);
                     String valueKey = "value_" + String(s) + "_" + String(g) + "_" + String(p);
-                    String angleStr = config_server.arg(angleKey);
-                    String valueStr = config_server.arg(valueKey);
-                    Serial.printf("[DEBUG] POST: %s='%s', %s='%s'\n", angleKey.c_str(), angleStr.c_str(), valueKey.c_str(), valueStr.c_str());
-                    gauge_cal[s][g][p].angle = angleStr.toInt();
-                    gauge_cal[s][g][p].value = valueStr.toFloat();
-                }
-            }
-        }
-        // Print updated gauge_cal values before saving
-        Serial.println("[DEBUG] gauge_cal values after POST:");
-        for (int s = 0; s < NUM_SCREENS; ++s) {
-            for (int g = 0; g < 2; ++g) {
-                for (int p = 0; p < 5; ++p) {
-                    Serial.printf("[DEBUG] gauge_cal[%d][%d][%d]: angle=%d value=%.2f\n", s, g, p, gauge_cal[s][g][p].angle, gauge_cal[s][g][p].value);
+                    gauge_cal[s][g][p].angle = config_server.arg(angleKey).toInt();
+                    gauge_cal[s][g][p].value = config_server.arg(valueKey).toFloat();
                 }
             }
         }
@@ -940,30 +922,6 @@ void handle_save_gauges() {
             Serial.println("[HOTAPPLY] apply_all_screen_visuals() returned false — UI objects may not be present yet");
             // still set skip flag so the page reflects in-memory state; we will not reboot
             skip_next_load_preferences = true;
-        }
-        // Debug: print updated screen_configs including buzzer flags to verify checkboxes
-        Serial.println("[DEBUG] Screen configs after save (including buzzer flags):");
-        dump_screen_configs();
-        
-        // NVS key enumeration debug (after all saves, before reboot)
-        {
-            nvs_handle_t nvs_enum_handle;
-            esp_err_t nvs_enum_err = nvs_open(PREF_NAMESPACE, NVS_READONLY, &nvs_enum_handle);
-            if (nvs_enum_err == ESP_OK) {
-                Serial.println("[NVS ENUM] Listing all keys in 'gaugeconfig' namespace after icon/zone save:");
-                nvs_iterator_t it = NULL;
-                esp_err_t enum_find_err = nvs_entry_find(NULL, PREF_NAMESPACE, NVS_TYPE_ANY, &it);
-                while (enum_find_err == ESP_OK && it != NULL) {
-                    nvs_entry_info_t info;
-                    nvs_entry_info(it, &info);
-                    Serial.printf("[NVS ENUM] key: %s, type: %d\n", info.key, info.type);
-                    enum_find_err = nvs_entry_next(&it);
-                }
-                Serial.println("[NVS ENUM] End of key list.");
-                nvs_close(nvs_enum_handle);
-            } else {
-                Serial.printf("[NVS ENUM] nvs_open failed: %d\n", nvs_enum_err);
-            }
         }
         // Try to apply visual changes at runtime (hot-update). If LVGL objects are not present
         // or the update fails, fall back to reboot to ensure a clean load.

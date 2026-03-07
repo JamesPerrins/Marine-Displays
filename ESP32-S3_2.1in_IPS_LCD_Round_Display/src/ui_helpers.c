@@ -289,13 +289,11 @@ void _ui_apply_icon_style(lv_obj_t *img, int screen, int gauge)
    const char *icon_path = screen_configs[screen].icon_paths[gauge];
    ESP_LOGW(TAG_UI_HELPERS, "[ICON INIT] screen=%d gauge=%d path='%s'", screen, gauge, (icon_path ? icon_path : "NULL"));
 
-   // If no icon path is configured, clear any stale image source and keep hidden.
+   // If no icon path is configured, keep hidden — do NOT call lv_img_set_src(NULL)
+   // every cycle as this floods the log with "unknown type" warnings each frame.
    if (!icon_path || icon_path[0] == '\0') {
-      lv_img_set_src(img, NULL);
       lv_obj_set_style_img_opa(img, LV_OPA_TRANSP, LV_PART_MAIN);
       lv_obj_add_flag(img, LV_OBJ_FLAG_HIDDEN);
-      ESP_LOGW(TAG_UI_HELPERS, "[ICON INIT] screen=%d gauge=%d empty path - cleared src and hid icon", screen, gauge);
-      lv_obj_invalidate(img);
       return;
    }
 

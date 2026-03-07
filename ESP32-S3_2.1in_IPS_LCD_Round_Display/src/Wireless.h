@@ -1,6 +1,11 @@
 #pragma once
 #include "WiFi.h"
-#include <BLEDevice.h>
+#if __has_include(<BLEDevice.h>)
+  #include <BLEDevice.h>
+  #define HAS_BLE 1
+#else
+  #define HAS_BLE 0
+#endif
 
 extern bool WIFI_Connection;
 extern uint8_t WIFI_NUM;

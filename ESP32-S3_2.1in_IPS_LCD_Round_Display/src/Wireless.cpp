@@ -31,6 +31,7 @@ int wifi_scan_number()
 }
 int ble_scan_number()
 {
+#if HAS_BLE
   printf("/**********BLE Test**********/\r\n"); 
   BLEDevice::init("");
   BLEScan* pBLEScan = BLEDevice::getScan();
@@ -52,6 +53,10 @@ int ble_scan_number()
   vTaskDelay(100);         
   printf("/**********BLE Test Over**********/\r\n\r\n");
   return count;
+#else
+  printf("BLE not available on this build\r\n");
+  return 0;
+#endif
 }
 
 void WirelessScanTask(void *parameter) {

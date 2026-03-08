@@ -619,8 +619,13 @@ void resume_signalk_ws() {
     if (!signalk_enabled) return;
     g_signalk_ws_resume_pending = false;
     g_signalk_ws_paused = false;
-    next_reconnect_at = 0; // reconnect without waiting full backoff
-    Serial.println("[SK] WS resumed - reconnecting to Signal K");
+    // Delay reconnect by 8s to allow lwIP to free TIME_WAIT PCBs and PBUF_RAM
+    // allocations from the HTTP page send. Reconnecting immediately (next_reconnect_at=0)
+    // causes the WS receive buffer malloc (~22KB) to fail against still-occupied
+    // internal heap, crashing the device.
+    next_reconnect_at = millis() + 8000;
+    current_backoff_ms = RECONNECT_BASE_MS;
+    Serial.println("[SK] WS resumed - reconnecting to Signal K in 8s (lwIP TIME_WAIT clearing)");
 }
 
 // Schedule a WS resume to happen after the next apply_all_screen_visuals() completes.

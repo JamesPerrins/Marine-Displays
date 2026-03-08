@@ -74,6 +74,10 @@ void init_sensor_mutex();
 // Signal K control functions
 void enable_signalk(const char* ssid, const char* password, const char* server_ip, uint16_t server_port);
 void disable_signalk();
+// Temporarily disconnect WS while config UI is open (frees ~22KB WS receive buffer)
+void pause_signalk_ws();
+// Resume WS connection after config save; reconnects automatically
+void resume_signalk_ws();
 // Rebuild and (re)send Signal K subscription list from current configuration
 void refresh_signalk_subscriptions();
 // Fetch metadata for all configured paths (gauges, number, dual displays)

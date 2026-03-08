@@ -47,6 +47,10 @@ static uint16_t server_port_num = 0;
 static String signalk_paths[TOTAL_PARAMS];  // Array of 10 paths
 static TaskHandle_t signalk_task_handle = NULL;
 static bool signalk_enabled = false;
+// Set by HTTP handler (Core 1) before building/sending the config page.
+// signalk_task (Core 0) sees this, disconnects the WS, and suspends reconnects
+// until the flag is cleared on save — freeing the ~22KB WS receive buffer.
+static volatile bool g_signalk_ws_paused = false;
 
 // Connection health and reconnection/backoff state
 static unsigned long last_message_time = 0;
@@ -360,19 +364,20 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
         // reset backoff on successful connect
         current_backoff_ms = RECONNECT_BASE_MS;
         // Build subscription JSON for ALL configured paths (gauge, number, dual, quad, gauge+num, graph)
+        // Manual string build avoids DynamicJsonDocument's 2048B iRAM alloc in the WS connect handler.
         std::vector<String> all_conn_paths = get_all_signalk_paths();
-        DynamicJsonDocument subdoc(2048);
-        subdoc["context"] = "vessels.self";
-        JsonArray subs = subdoc.createNestedArray("subscribe");
+        String out = "{\"context\":\"vessels.self\",\"subscribe\":[";
+        bool first_conn = true;
         for (const String& p : all_conn_paths) {
             if (p.length() > 0) {
-                JsonObject s = subs.createNestedObject();
-                s["path"] = p;
-                s["period"] = 0; // instant updates (server may push immediately)
+                if (!first_conn) out += ",";
+                out += "{\"path\":\"";
+                out += p;
+                out += "\",\"period\":0}";
+                first_conn = false;
             }
         }
-        String out;
-        serializeJson(subdoc, out);
+        out += "]}";
         ws_client.sendTXT(out);
         // flush any queued outgoing messages (resubscribe, etc)
         flush_outgoing();
@@ -454,6 +459,21 @@ static void signalk_task(void *parameter) {
     vTaskDelay(pdMS_TO_TICKS(500));
 
     while (signalk_enabled) {
+        // Config UI pause: the HTTP handler (Core 1) sets g_signalk_ws_paused before
+        // building/sending the ~144KB gauges page. We disconnect here (Core 0, the only
+        // thread that safely owns ws_client) to free the ~22KB WS receive buffer, giving
+        // the SD DMA layer enough contiguous iRAM to write configs after the page send.
+        if (g_signalk_ws_paused) {
+            if (ws_client.isConnected()) {
+                ws_client.disconnect();
+                next_reconnect_at = 0;          // reconnect immediately on resume
+                current_backoff_ms = RECONNECT_BASE_MS;
+                Serial.println("[SK] Config UI active - WS disconnected to free iRAM");
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
         ws_client.loop();
         // Drain any messages queued from other tasks (e.g. refresh_signalk_subscriptions
         // called from the HTTP handler on Core 1). Only safe to call sendTXT() from here.
@@ -569,6 +589,33 @@ void disable_signalk() {
     }
     ws_client.disconnect();
     Serial.println("Signal K disabled (WebSocket disconnected)");
+}
+
+// Pause the WebSocket connection while the config UI is open.
+// Sets the pause flag and yields 300ms so signalk_task (Core 0) sees it,
+// calls ws_client.disconnect(), and the ~22KB WS receive buffer is freed
+// before the HTTP handler builds and sends the large config page.
+void pause_signalk_ws() {
+    if (!signalk_enabled) return;
+    g_signalk_ws_paused = true;
+    // 6 × 50ms = 300ms: task runs every 10ms so it sees the flag in <10ms;
+    // remaining 290ms is for lwIP to actually free the TCP socket buffers.
+    for (int i = 0; i < 6; i++) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+        esp_task_wdt_reset();
+    }
+    Serial.printf("[SK] WS paused for config UI, iRAM now %u B\n",
+                  heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+}
+
+// Resume the WebSocket connection after the config save completes.
+// The signalk_task will reconnect on its next loop; the WStype_CONNECTED
+// event handler sends updated subscriptions automatically on reconnect.
+void resume_signalk_ws() {
+    if (!signalk_enabled) return;
+    g_signalk_ws_paused = false;
+    next_reconnect_at = 0; // reconnect without waiting full backoff
+    Serial.println("[SK] WS resumed - reconnecting to Signal K");
 }
 
 // Rebuild the subscription list from current configuration and (re)send it

@@ -666,6 +666,11 @@ void handle_gauges_page() {
     // updated after every save, so calling load_preferences() here is redundant
     // and causes SD/WiFi DMA contention that drops the SK WebSocket.
     skip_next_load_preferences = false; // consume flag if set
+    // Disconnect SignalK WebSocket while the config page is open so its ~22KB
+    // receive buffer is freed before we build and send the large HTML page.
+    // This ensures enough contiguous iRAM remains for SD DMA writes on save.
+    // The connection is restored automatically in handle_save_gauges().
+    pause_signalk_ws();
     Serial.println("[GAUGES] handler entered");
     // Build the entire page into a single String pre-allocated in PSRAM.
     // BOARD_HAS_PSRAM + ESP-IDF default threshold (16KB): any malloc > 16KB goes
@@ -1941,7 +1946,11 @@ void handle_save_gauges() {
 
         // Refresh Signal K subscriptions immediately in case any SK paths changed
         // (safe to call even if WS not connected; function will no-op locally)
-        refresh_signalk_subscriptions();
+        // Resume the WebSocket — signalk_task will reconnect and the WStype_CONNECTED
+        // handler automatically resubscribes to all configured paths.
+        // This also frees the save from needing refresh_signalk_subscriptions() since
+        // the reconnect event handles subscription refresh automatically.
+        resume_signalk_ws();
         // Note: fetch_all_metadata() intentionally NOT called here — it makes blocking
         // HTTP requests (up to 1.5s each × many paths) which causes WDT on Core 1.
         // Metadata is fetched automatically on WS connect (wsEvent WStype_CONNECTED).

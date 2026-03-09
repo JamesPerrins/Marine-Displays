@@ -22,8 +22,22 @@
 
 // Place fallback/error screen logic after all includes and config loads
 extern "C" void show_fallback_error_screen_if_needed() {
+    // A screen is considered configured if ANY of the following are non-default:
+    //   - display_type != GAUGE (NUMBER/DUAL/QUAD/GRAPH/COMPASS/POSITION have no cal points)
+    //   - background_path set
+    //   - icon_paths set
+    //   - number_path / dual_top_path / quad paths set  (NUMBER/DUAL/QUAD screens)
+    //   - calibration angles set                        (GAUGE screens with custom cal)
+    // Checking ONLY cal angles gives false positives for screens that use default
+    // linear mapping or non-gauge display types.
     bool all_default = true;
     for (int s = 0; s < NUM_SCREENS && all_default; ++s) {
+        if (screen_configs[s].display_type != 0) { all_default = false; break; }
+        if (screen_configs[s].background_path[0] != '\0') { all_default = false; break; }
+        if (screen_configs[s].icon_paths[0][0] != '\0') { all_default = false; break; }
+        if (screen_configs[s].icon_paths[1][0] != '\0') { all_default = false; break; }
+        if (screen_configs[s].number_path[0] != '\0') { all_default = false; break; }
+        if (screen_configs[s].dual_top_path[0] != '\0') { all_default = false; break; }
         for (int g = 0; g < 2 && all_default; ++g) {
             for (int p = 0; p < 5; ++p) {
                 if (screen_configs[s].cal[g][p].angle != 0 || screen_configs[s].cal[g][p].value != 0.0f) {

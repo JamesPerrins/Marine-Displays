@@ -1581,6 +1581,26 @@ void loop() {
 
     Lvgl_Loop();
 
+    // WS idle watchdog: if the user opened the config page but closed the browser
+    // without saving, the WS stays paused forever. Auto-resume after 60s of
+    // config page inactivity so gauges continue updating normally.
+    {
+        static unsigned long last_ws_watchdog = 0;
+        unsigned long now_wd = millis();
+        if (now_wd - last_ws_watchdog >= 5000UL) {
+            last_ws_watchdog = now_wd;
+            if (is_signalk_ws_paused()
+                    && !g_signalk_ws_resume_pending
+                    && g_config_page_last_seen != 0
+                    && (now_wd - g_config_page_last_seen) >= 60000UL) {
+                Serial.printf("[SK] Config page idle >60s (iRAM=%u), auto-resuming WS\n",
+                              heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+                g_config_page_last_seen = 0;
+                resume_signalk_ws();
+            }
+        }
+    }
+
     // Maintain TCA9554 PIN6 LOW (buzzer OFF, active-HIGH circuit) every 50ms.
     // esp_io_expander_new_i2c_tca9554 resets CONFIG=0xFF (all inputs) during LCD_Init;
     // when PIN6 is high-Z the pull-up circuit turns the buzzer ON.

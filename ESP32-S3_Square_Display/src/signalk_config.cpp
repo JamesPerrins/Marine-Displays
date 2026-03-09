@@ -617,6 +617,11 @@ void disable_signalk() {
     Serial.println("Signal K disabled (WebSocket disconnected)");
 }
 
+// Returns true if the WS is currently paused.
+bool is_signalk_ws_paused() {
+    return g_signalk_ws_paused;
+}
+
 // Pause the WebSocket connection while the config UI is open.
 // Sets the pause flag and yields 300ms so signalk_task (Core 0) sees it,
 // calls ws_client.disconnect(), and the ~22KB WS receive buffer is freed

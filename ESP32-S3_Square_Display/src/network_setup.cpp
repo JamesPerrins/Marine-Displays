@@ -238,6 +238,8 @@ static volatile bool skip_next_load_preferences = false;
 // with the display DMA flush and corrupts heap after repeated page-builds.
 volatile bool g_pending_visual_apply = false;
 volatile bool g_screens_need_apply[5] = {false, false, false, false, false};
+// millis() timestamp of the last config page visit; reset to 0 after WS auto-resume.
+unsigned long g_config_page_last_seen = 0;
 
 // Asset file lists — populated once at startup by scan_sd_assets().
 // Reusing these in handle_gauges_page() avoids a live SD scan during HTTP
@@ -730,6 +732,7 @@ void handle_gauges_page() {
     // This ensures enough contiguous iRAM remains for SD DMA writes on save.
     // The connection is restored automatically in handle_save_gauges().
     pause_signalk_ws();
+    g_config_page_last_seen = millis();  // watchdog: auto-resume if page closes without saving
     Serial.printf("[GAUGES] handler entered, iRAM=%u\n",
         heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     // Send HTTP headers immediately using chunked transfer encoding so we can

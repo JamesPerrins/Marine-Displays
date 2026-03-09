@@ -76,6 +76,8 @@ void enable_signalk(const char* ssid, const char* password, const char* server_i
 void disable_signalk();
 // Temporarily disconnect WS while config UI is open (frees ~22KB WS receive buffer)
 void pause_signalk_ws();
+// Returns true if WS is currently paused (for watchdog checks)
+bool is_signalk_ws_paused();
 // Resume WS connection after config save; reconnects automatically
 void resume_signalk_ws();
 // Defer WS resume until after the next apply_all_screen_visuals() in the main loop.

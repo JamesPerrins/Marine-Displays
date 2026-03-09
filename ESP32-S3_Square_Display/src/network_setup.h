@@ -28,6 +28,9 @@ extern volatile bool g_pending_visual_apply;
 // Per-screen lazy re-apply flags: set when a save happens while the screen was
 // inactive; cleared when that screen becomes active and visuals are re-applied.
 extern volatile bool g_screens_need_apply[5];
+// Timestamp (millis) when the config page was last opened. Used by the WS
+// watchdog in loop() to auto-resume if the user closes the browser without saving.
+extern unsigned long g_config_page_last_seen;
 
 // Check if WiFi is connected
 bool is_wifi_connected();

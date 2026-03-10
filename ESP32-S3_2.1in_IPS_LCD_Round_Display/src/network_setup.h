@@ -30,6 +30,10 @@ String get_signalk_server_ip();
 // Get configured Signal K port
 uint16_t get_signalk_server_port();
 
+// Get Cloudflare Access credentials (empty strings if not configured)
+String get_cf_client_id();
+String get_cf_client_secret();
+
 // Get/set configured Signal K path by index (0-9)
 String get_signalk_path_by_index(int index);
 void set_signalk_path_by_index(int index, const String& path);

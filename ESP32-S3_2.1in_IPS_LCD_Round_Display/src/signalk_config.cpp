@@ -27,6 +27,7 @@ SemaphoreHandle_t sensor_mutex = NULL;
 static WebSocketsClient ws_client;
 static String server_ip_str = "";
 static uint16_t server_port_num = 0;
+static bool use_ssl = false;
 static String signalk_paths[TOTAL_PARAMS];  // Array of 10 paths
 static TaskHandle_t signalk_task_handle = NULL;
 static bool signalk_enabled = false;
@@ -83,6 +84,34 @@ static void flush_outgoing() {
 void enqueue_signalk_message(const String &msg) {
     if (ws_queue_mutex == NULL) return;
     enqueue_outgoing(msg);
+}
+
+static void wsEvent(WStype_t type, uint8_t * payload, size_t length); // forward declaration
+
+// Connect (or reconnect) WebSocket, using SSL when port is 443
+static void ws_connect() {
+    if (use_ssl) {
+        // NULL CA cert + NULL fingerprint causes the library to call setInsecure()
+        // internally, accepting self-signed certificates (typical for local SignalK servers)
+        ws_client.beginSSL(server_ip_str.c_str(), server_port_num, "/signalk/v1/stream");
+        Serial.println("Signal K: connecting via WSS (SSL, no cert verification)");
+    } else {
+        ws_client.begin(server_ip_str.c_str(), server_port_num, "/signalk/v1/stream");
+        Serial.println("Signal K: connecting via WS (plain)");
+    }
+    ws_client.onEvent(wsEvent);
+    ws_client.setReconnectInterval(0);  // disable library reconnect - we manage it ourselves
+    // Build extra headers: Origin always, plus CF Access tokens if configured
+    String origin = String(use_ssl ? "https://" : "http://") + server_ip_str;
+    String headers = "Origin: " + origin;
+    String cf_id = get_cf_client_id();
+    String cf_secret = get_cf_client_secret();
+    if (cf_id.length() > 0 && cf_secret.length() > 0) {
+        headers += "\r\nCF-Access-Client-Id: " + cf_id;
+        headers += "\r\nCF-Access-Client-Secret: " + cf_secret;
+        Serial.println("Signal K: CF Access headers added");
+    }
+    ws_client.setExtraHeaders(headers.c_str());
 }
 
 // Convert dot-delimited Signal K path to REST URL form
@@ -143,6 +172,7 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
                 JsonObject s = subs.createNestedObject();
                 s["path"] = signalk_paths[i];
                 s["period"] = 0; // instant updates (server may push immediately)
+                Serial.printf("[SK] Subscribing [%d]: %s\n", i, signalk_paths[i].c_str());
             }
         }
         String out;
@@ -173,15 +203,19 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
                     for (int i = 0; i < TOTAL_PARAMS; i++) {
                         if (signalk_paths[i].length() > 0 && signalk_paths[i].equals(path)) {
                             set_sensor_value(i, value);
-                            // Serial logging for visibility
-                            Serial.print("WS Path["); Serial.print(i); Serial.print("]: "); Serial.println(value);
+                            Serial.printf("[SK] Received [%d] %s = %.4f\n", i, path, value);
                         }
                     }
                 }
             }
         }
     }
-    // handle pong or ping responses if available
+    if (type == WStype_DISCONNECTED) {
+        Serial.println("[SK] WebSocket disconnected");
+    }
+    if (type == WStype_ERROR) {
+        Serial.printf("[SK] WebSocket error: %s\n", payload ? (char*)payload : "(no detail)");
+    }
     if (type == WStype_PONG) {
         last_message_time = millis();
         Serial.println("Signal K: received PONG");
@@ -227,9 +261,7 @@ static void signalk_task(void *parameter) {
             }
             if (now >= next_reconnect_at) {
                 Serial.println("Signal K: attempting reconnect...");
-                // re-init client
-                ws_client.begin(server_ip_str.c_str(), server_port_num, "/signalk/v1/stream");
-                ws_client.onEvent(wsEvent);
+                ws_connect();
                 last_reconnect_attempt = now;
                 // schedule next if this fails
                 unsigned int jitter = (esp_random() & 0x7FF) % 1000;
@@ -255,6 +287,7 @@ void enable_signalk(const char* ssid, const char* password, const char* server_i
     signalk_enabled = true;
     server_ip_str = server_ip;
     server_port_num = server_port;
+    use_ssl = (server_port == 443);
     
     // Get all 10 paths from configuration (these are set in sensESP_setup)
     for (int i = 0; i < TOTAL_PARAMS; i++) {
@@ -280,16 +313,13 @@ void enable_signalk(const char* ssid, const char* password, const char* server_i
     Serial.println("Signal K: Starting WebSocket client...");
 
     // Initialize websocket client
-    ws_client.begin(server_ip_str.c_str(), server_port_num, "/signalk/v1/stream");
-    ws_client.onEvent(wsEvent);
-    // We'll manage reconnection with backoff ourselves
-    ws_client.setReconnectInterval(0);
+    ws_connect();
 
     // Create task to pump ws loop
     xTaskCreatePinnedToCore(
         signalk_task,
         "SignalKWS",
-        8192,
+        16384,  // SSL requires ~12-16KB stack
         NULL,
         3,
         &signalk_task_handle,

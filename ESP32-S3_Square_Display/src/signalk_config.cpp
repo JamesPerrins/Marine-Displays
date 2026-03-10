@@ -52,7 +52,7 @@ static bool signalk_enabled = false;
 // until the flag is cleared on save — freeing the ~22KB WS receive buffer.
 static volatile bool g_signalk_ws_paused = false;
 
-// Set by resume_signalk_ws() to tell signalk_task to reconnect once iRAM > 18KB.
+// Set by resume_signalk_ws() to tell signalk_task to reconnect once iRAM > 20KB.
 // signalk_task clears both this and g_signalk_ws_paused when the threshold is met.
 static volatile bool g_signalk_ws_resume_when_ready = false;
 
@@ -475,10 +475,10 @@ static void signalk_task(void *parameter) {
             }
             // If resume was requested, wait until iRAM recovers before reconnecting.
             // lwIP TIME_WAIT PCBs from the HTTP page send hold ~15KB of internal heap
-            // for several seconds; connecting while iRAM < 18KB risks fragmentation.
+            // for several seconds; connecting while iRAM < 20KB crashes the device.
             if (g_signalk_ws_resume_when_ready) {
                 size_t free_iram = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-                if (free_iram >= 18 * 1024) {
+                if (free_iram >= 20 * 1024) {
                     g_signalk_ws_resume_when_ready = false;
                     g_signalk_ws_paused = false;
                     next_reconnect_at = millis() + 1000; // brief 1s settle then connect
@@ -486,7 +486,7 @@ static void signalk_task(void *parameter) {
                 } else {
                     static unsigned long last_iram_log = 0;
                     if (millis() - last_iram_log > 2000) {
-                        Serial.printf("[SK] Waiting for iRAM recovery (%u B < 18432)\n", free_iram);
+                        Serial.printf("[SK] Waiting for iRAM recovery (%u B < 20480)\n", free_iram);
                         last_iram_log = millis();
                     }
                 }
@@ -587,11 +587,20 @@ void enable_signalk(const char* ssid, const char* password, const char* server_i
     ws_client.setReconnectInterval(0);
 
     // Create task to pump ws loop.
-    // NOTE: xTaskCreateStaticPinnedToCore with a PSRAM stack fails with
-    // "xPortcheckValidStackMem" assert unless CONFIG_FREERTOS_TASK_STACK_IN_PSRAM
-    // is set in sdkconfig at IDF build time — a pre-compiled library check that
-    // a -D flag cannot override.  Use xTaskCreatePinnedToCore (internal RAM stack).
-    xTaskCreatePinnedToCore(signalk_task, "SignalKWS", 8192, NULL, 3, &signalk_task_handle, 0);
+    // Allocate the 8KB stack in PSRAM so it doesn't consume internal RAM.
+    // StaticTask_t TCB must stay in internal RAM (FreeRTOS requirement).
+    static StaticTask_t sk_tcb;
+    uint8_t* sk_stack = (uint8_t*)heap_caps_malloc(8192, MALLOC_CAP_SPIRAM);
+    if (sk_stack == nullptr) {
+        // Fallback to internal RAM if PSRAM allocation fails
+        Serial.println("[SK] PSRAM stack alloc failed, using internal RAM");
+        xTaskCreatePinnedToCore(signalk_task, "SignalKWS", 8192, NULL, 3, &signalk_task_handle, 0);
+    } else {
+        signalk_task_handle = xTaskCreateStaticPinnedToCore(
+            signalk_task, "SignalKWS", 8192, NULL, 3,
+            sk_stack, &sk_tcb, 0
+        );
+    }
 
     Serial.println("Signal K WebSocket task created successfully");
     Serial.flush();
@@ -637,13 +646,13 @@ volatile bool g_signalk_ws_resume_pending = false;
 
 // Resume the WebSocket connection after the config save completes.
 // Keeps g_signalk_ws_paused=true and sets g_signalk_ws_resume_when_ready so the
-// signalk_task will reconnect once iRAM > 18KB (lwIP TIME_WAIT PCBs have cleared).
+// signalk_task will reconnect once iRAM > 20KB (lwIP TIME_WAIT PCBs have cleared).
 void resume_signalk_ws() {
     if (!signalk_enabled) return;
     g_signalk_ws_resume_pending = false;
     // Keep paused — signalk_task will clear the pause once iRAM recovers
     g_signalk_ws_resume_when_ready = true;
-    Serial.println("[SK] WS resume requested - waiting for iRAM > 18KB before reconnecting");
+    Serial.println("[SK] WS resume requested - waiting for iRAM > 20KB before reconnecting");
 }
 
 // Schedule a WS resume to happen after the next apply_all_screen_visuals() completes.

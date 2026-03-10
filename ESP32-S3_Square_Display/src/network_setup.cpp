@@ -755,14 +755,13 @@ void handle_gauges_page() {
     }
     html.clear();
     // flushHtml: send whatever is currently in html to the client, then clear it.
-    // lv_timer_handler() is called after each send so the display keeps
-    // updating while loop() is blocked inside sendContent() during the stream.
+    // delay(1) yields to the lwIP/WiFi task so it can process ACKs and free
+    // TCP PBUFs before we queue the next section.
     auto flushHtml = [&]() {
         if (html.length() > 0) {
             esp_task_wdt_reset();
             config_server.sendContent(html);
             html.clear();
-            lv_timer_handler(); // keep display alive during long HTTP stream
         }
     };
     html += "<!DOCTYPE html><html><head>";
@@ -1553,11 +1552,6 @@ void handle_gauges_page() {
     Serial.flush();
     // All data sent — force RST so the PCB is freed immediately (no 60 s TIME_WAIT).
     rst_close_client();
-    // Resume WS immediately — don't wait 60s for the watchdog.
-    // handle_save_gauges() re-pauses on every save, so this is safe.
-    // Clear the watchdog timestamp so it doesn't double-fire.
-    g_config_page_last_seen = 0;
-    resume_signalk_ws();
 }
 
 void handle_save_gauges() {

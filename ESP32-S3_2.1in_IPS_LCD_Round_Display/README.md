@@ -1,5 +1,5 @@
 Boating with the Baileys
-Jan 2026
+Feb 2026
 
 ESP32 customisable display using data from SignalK. 
 ------------------------------
@@ -12,7 +12,7 @@ It features:
 - WebUI driven
 - Touch and non Touch options
 
-NOTE -  TESTINGS FOR ESP32-S3 2.1" Display
+NOTE -  Tested and now working.
 
 This folder contains files and documentation for building the ESP32-S3 based 2.1" Display.
 

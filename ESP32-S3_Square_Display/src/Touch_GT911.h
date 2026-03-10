@@ -4,7 +4,7 @@
 #include "I2C_Driver.h"
 #include "TCA9554PWR.h"
 
-#define GT911_ADDR          0x5D
+#define GT911_ADDR          0x14
 #define GT911_INT_PIN       16
 
 

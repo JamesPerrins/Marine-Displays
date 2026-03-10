@@ -36,11 +36,30 @@ void ST7701_CS_Dis(){
   vTaskDelay(pdMS_TO_TICKS(10));
 }
 void ST7701_Reset(){
-  Set_EXIO(EXIO_PIN1,Low);
-  vTaskDelay(pdMS_TO_TICKS(10));
+ /*  Set_EXIO(EXIO_PIN1,Low);
+  vTaskDelay(pdMS_TO_TICKS(20));
   Set_EXIO(EXIO_PIN1,High);
-  vTaskDelay(pdMS_TO_TICKS(50));
+  vTaskDelay(pdMS_TO_TICKS(120));  // ST7701 requires >=120ms after reset before accepting commands */
+
+  Wire.beginTransmission(0x24);
+  Wire.write(0x02);
+  Wire.write(0x00);
+  Wire.endTransmission();
+  delay(20);
+
+  Wire.beginTransmission(0x24);
+  Wire.write(0x02);
+  Wire.write(0xFF);
+  Wire.endTransmission();
+  delay(120);
+
+  Wire.beginTransmission(0x24);
+  Wire.write(0x03);
+  Wire.write(0x3A);
+  Wire.endTransmission();
+
 }
+
 void ST7701_Init()
 {
   // 初始化SPI总线

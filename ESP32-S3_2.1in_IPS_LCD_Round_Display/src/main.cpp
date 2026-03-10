@@ -375,9 +375,9 @@ void test_move_gauge(int screen, int gauge, int angle) {
 void setup() {
         // test_nvs_minimal() removed during cleanup
     // Serial for debugging - with timeout
-    Serial.setTxTimeoutMs(0);  // Non-blocking serial
+    //Serial.setTxTimeoutMs(0);  // Non-blocking serial
     Serial.begin(115200);
-    delay(500);
+    //delay(2000);  // USB CDC needs ~1-2s to enumerate on cold boot
     
     Serial.println("\n\n=== ESP32 Round Display Starting ===");
     Serial.flush();
@@ -387,7 +387,7 @@ void setup() {
     delay(100);
     TCA9554PWR_Init(0x00);
     Set_EXIO(EXIO_PIN8, Low);    // Start with buzzer OFF
-    Set_EXIO(EXIO_PIN3, Low);    // Keep other pins low
+    Set_EXIO(EXIO_PIN3, High);   // CS deasserted (HIGH) before SPI init - prevents spurious SPI edges on cold boot
     Serial.println("I2C and IO expander initialized");
     Serial.flush();
     

@@ -10,7 +10,8 @@
 #include "calibration_types.h"
 extern GaugeCalibrationPoint gauge_cal[NUM_SCREENS][2][5];
 
-// Global web server instance
+// Global synchronous web server instance (WebServer — handleClient() called
+// from loop() on Core 1; HTTP handlers also run on Core 1).
 extern WebServer config_server;
 
 // Auto-scroll interval in seconds (0 = off)
@@ -31,6 +32,17 @@ extern volatile bool g_screens_need_apply[5];
 // Timestamp (millis) when the config page was last opened. Used by the WS
 // watchdog in loop() to auto-resume if the user closes the browser without saving.
 extern unsigned long g_config_page_last_seen;
+
+// Deferred LVGL action flags set by async HTTP handlers (Core 0) and consumed
+// in loop() on Core 1 where LVGL operations are safe.
+extern volatile int  g_pending_set_screen_idx;   // -1 = no pending
+extern volatile bool g_pending_test_gauge;         // move needle for calibration
+extern volatile int  g_pending_test_screen_idx;
+extern volatile int  g_pending_test_gauge_idx;
+extern volatile int  g_pending_test_angle;
+extern volatile bool g_pending_apply_needles;      // apply_all_needle_styles()
+extern volatile bool g_pending_auto_scroll_update; // set_auto_scroll_interval()
+extern volatile uint16_t g_pending_auto_scroll_sec;
 
 // Check if WiFi is connected
 bool is_wifi_connected();

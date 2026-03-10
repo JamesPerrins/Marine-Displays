@@ -473,23 +473,11 @@ static void signalk_task(void *parameter) {
                 current_backoff_ms = RECONNECT_BASE_MS;
                 Serial.println("[SK] Config UI active - WS disconnected to free iRAM");
             }
-            // If resume was requested, wait until iRAM recovers before reconnecting.
-            // lwIP TIME_WAIT PCBs from the HTTP page send hold ~15KB of internal heap
-            // for several seconds; connecting while iRAM < 18KB risks fragmentation.
             if (g_signalk_ws_resume_when_ready) {
-                size_t free_iram = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-                if (free_iram >= 18 * 1024) {
-                    g_signalk_ws_resume_when_ready = false;
-                    g_signalk_ws_paused = false;
-                    next_reconnect_at = millis() + 1000; // brief 1s settle then connect
-                    Serial.printf("[SK] iRAM recovered to %u B - WS unpaused\n", free_iram);
-                } else {
-                    static unsigned long last_iram_log = 0;
-                    if (millis() - last_iram_log > 2000) {
-                        Serial.printf("[SK] Waiting for iRAM recovery (%u B < 18432)\n", free_iram);
-                        last_iram_log = millis();
-                    }
-                }
+                g_signalk_ws_resume_when_ready = false;
+                g_signalk_ws_paused = false;
+                next_reconnect_at = millis() + 1000;
+                Serial.println("[SK] WS unpaused, reconnecting in 1s");
             }
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;

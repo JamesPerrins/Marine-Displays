@@ -1551,8 +1551,8 @@ void handle_gauges_page() {
     Serial.printf("[GAUGES] stream complete, iRAM=%u\n",
         heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     Serial.flush();
-    // All data sent — force RST so the PCB is freed immediately (no 60 s TIME_WAIT).
-    rst_close_client();
+    // NOTE: do NOT call rst_close_client() here — we are still inside handleClient().
+    // Closing the socket inside the handler causes handleClient() to crash on cleanup.
     // Resume WS immediately — don't wait 60s for the watchdog.
     // handle_save_gauges() re-pauses on every save, so this is safe.
     // Clear the watchdog timestamp so it doesn't double-fire.

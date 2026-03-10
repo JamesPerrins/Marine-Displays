@@ -2,6 +2,7 @@
 #include "screen_config_c_api.h"
 #include "ui.h"
 #include <stdio.h>
+#include <esp_attr.h>
 
 // Storage for dual display components (top and bottom for each screen)
 static lv_obj_t* dual_top_labels[NUM_SCREENS] = {nullptr};
@@ -26,12 +27,13 @@ static lv_obj_t* get_screen_obj(int screen_num) {
 }
 
 // Previous values for change detection
-static char prev_dual_top_text[NUM_SCREENS][64] = {0};
-static char prev_dual_top_unit[NUM_SCREENS][32] = {0};
-static char prev_dual_top_description[NUM_SCREENS][128] = {0};
-static char prev_dual_bottom_text[NUM_SCREENS][64] = {0};
-static char prev_dual_bottom_unit[NUM_SCREENS][32] = {0};
-static char prev_dual_bottom_description[NUM_SCREENS][128] = {0};
+// EXT_RAM_ATTR → PSRAM, freeing ~2.2 KB of internal RAM
+EXT_RAM_ATTR static char prev_dual_top_text[NUM_SCREENS][64];
+EXT_RAM_ATTR static char prev_dual_top_unit[NUM_SCREENS][32];
+EXT_RAM_ATTR static char prev_dual_top_description[NUM_SCREENS][128];
+EXT_RAM_ATTR static char prev_dual_bottom_text[NUM_SCREENS][64];
+EXT_RAM_ATTR static char prev_dual_bottom_unit[NUM_SCREENS][32];
+EXT_RAM_ATTR static char prev_dual_bottom_description[NUM_SCREENS][128];
 
 // Font size to LVGL font mapping - all native sizes, no scaling
 static const lv_font_t* get_font_for_size(uint8_t size) {

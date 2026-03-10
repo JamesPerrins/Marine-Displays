@@ -3,6 +3,7 @@
 #include "screen_config_c_api.h"
 #include <Arduino.h>
 #include <math.h>
+#include <esp_attr.h>
 
 // ─── Sweeping-tape compass geometry ───────────────────────────────────────────
 // The compass rose lives on a large virtual arc whose pivot sits BELOW the
@@ -33,12 +34,12 @@
 static lv_obj_t*   c_bg[NUM_SCREENS]                   = {};
 static lv_obj_t*   c_tape_arc[NUM_SCREENS]             = {};
 static lv_obj_t*   c_tick[NUM_SCREENS][N_TICKS]        = {};
-static lv_point_t  c_tick_pts[NUM_SCREENS][N_TICKS][2] = {};
+static EXT_RAM_ATTR lv_point_t  c_tick_pts[NUM_SCREENS][N_TICKS][2];
 static lv_obj_t*   c_deg_lbl[NUM_SCREENS][N_LABELS]    = {};
 static lv_obj_t*   c_ptr_l[NUM_SCREENS]                = {};
 static lv_obj_t*   c_ptr_r[NUM_SCREENS]                = {};
-static lv_point_t  c_ptr_pts_l[NUM_SCREENS][2]         = {};
-static lv_point_t  c_ptr_pts_r[NUM_SCREENS][2]         = {};
+static EXT_RAM_ATTR lv_point_t  c_ptr_pts_l[NUM_SCREENS][2];
+static EXT_RAM_ATTR lv_point_t  c_ptr_pts_r[NUM_SCREENS][2];
 static lv_obj_t*   c_hdg_lbl[NUM_SCREENS]              = {};
 static lv_obj_t*   c_card_lbl[NUM_SCREENS]             = {};
 static lv_obj_t*   c_src_lbl[NUM_SCREENS]              = {};

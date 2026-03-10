@@ -6,13 +6,8 @@ extern bool test_mode;
 void handle_toggle_test_mode() {
     // Registered for HTTP_POST only.
     test_mode = !test_mode;
-    // Redirect back to the gauges page, preserving active tab if provided
-    String redirectPath = "/gauges";
-    if (config_server.hasArg("active_tab")) {
-        String at = config_server.arg("active_tab");
-        at.trim();
-        if (at.length() > 0) redirectPath += "#tab" + at;
-    }
-    config_server.sendHeader("Location", redirectPath, true);
-    config_server.send(302, "text/plain", "");
+    // Return JSON for AJAX caller (no redirect / page reload)
+    config_server.sendHeader("Connection", "close");
+    config_server.send(200, "application/json",
+        String("{\"ok\":true,\"test_mode\":") + (test_mode ? "true" : "false") + "}");
 }

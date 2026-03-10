@@ -7,7 +7,22 @@
 #include <ArduinoJson.h>
 #include <esp_system.h>
 #include "esp_task_wdt.h"
+#include <esp_heap_caps.h>
 #include <map>
+
+// Custom ArduinoJson allocator that uses PSRAM instead of internal RAM.
+// Saves ~4 KB of iRAM on every SK WebSocket message parse.
+struct PsramAllocator {
+    void* allocate(size_t size) {
+        return heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    void deallocate(void* ptr) {
+        heap_caps_free(ptr);
+    }
+    void* reallocate(void* ptr, size_t new_size) {
+        return heap_caps_realloc(ptr, new_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+};
 
 // Global array to hold all sensor values (10 parameters)
 float g_sensor_values[TOTAL_PARAMS] = {
@@ -260,7 +275,7 @@ static void fetch_metadata_for_path(int index, const String &path) {
     if (httpCode == HTTP_CODE_OK) {
         String payload = http.getString();
         
-        DynamicJsonDocument doc(2048);
+        BasicJsonDocument<PsramAllocator> doc(2048);
         DeserializationError err = deserializeJson(doc, payload);
         
         if (!err) {
@@ -332,7 +347,7 @@ void fetch_all_metadata() {
             
             if (httpCode == 200) {
                 String payload = http.getString();
-                DynamicJsonDocument doc(2048);
+                BasicJsonDocument<PsramAllocator> doc(2048);
                 DeserializationError err = deserializeJson(doc, payload);
                 
                 if (!err && doc.containsKey("meta")) {
@@ -396,8 +411,8 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
         last_message_time = millis();
         String msg = String((char*)payload, length);
         
-        // Parse incoming JSON and look for updates->values
-        DynamicJsonDocument doc(4096);
+        // Parse incoming JSON in PSRAM to avoid ~4 KB iRAM allocation per message
+        BasicJsonDocument<PsramAllocator> doc(4096);
         DeserializationError err = deserializeJson(doc, msg);
         if (err) {
             Serial.printf("[SIGNALK] JSON parse error: %s\n", err.c_str());
@@ -607,6 +622,18 @@ bool is_signalk_ws_paused() {
 // before the HTTP handler builds and sends the large config page.
 void pause_signalk_ws() {
     if (!signalk_enabled) return;
+    // Cancel any pending or in-flight resume so the signalk_task doesn't
+    // unpause itself while we're serving config fragments.
+    g_signalk_ws_resume_when_ready = false;
+    g_signalk_ws_resume_pending = false;
+
+    if (g_signalk_ws_paused) {
+        // Already paused — WS is disconnected and buffers are freed.
+        // Skip the 300ms wait; just print current iRAM for diagnostics.
+        Serial.printf("[SK] WS already paused, iRAM now %u B\n",
+                      heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+        return;
+    }
     g_signalk_ws_paused = true;
     // 6 × 50ms = 300ms: task runs every 10ms so it sees the flag in <10ms;
     // remaining 290ms is for lwIP to actually free the TCP socket buffers.

@@ -3,6 +3,7 @@
 #include "ui.h"
 #include <Arduino.h>
 #include <stdio.h>
+#include <esp_attr.h>
 
 // Storage for gauge+number display components (center number for each screen)
 static lv_obj_t* gauge_num_center_labels[NUM_SCREENS] = {nullptr};
@@ -23,9 +24,10 @@ static lv_obj_t* get_screen_obj(int screen_num) {
 }
 
 // Previous values for change detection
-static char prev_gauge_num_center_text[NUM_SCREENS][64] = {0};
-static char prev_gauge_num_center_unit[NUM_SCREENS][32] = {0};
-static char prev_gauge_num_center_description[NUM_SCREENS][128] = {0};
+// EXT_RAM_ATTR → PSRAM, freeing ~1.1 KB of internal RAM
+EXT_RAM_ATTR static char prev_gauge_num_center_text[NUM_SCREENS][64];
+EXT_RAM_ATTR static char prev_gauge_num_center_unit[NUM_SCREENS][32];
+EXT_RAM_ATTR static char prev_gauge_num_center_description[NUM_SCREENS][128];
 
 // Font size to LVGL font mapping
 static const lv_font_t* get_font_for_size(uint8_t size) {

@@ -432,7 +432,7 @@ void ST7701_Init()
 // Reset helper stub for ST7701 (no-op if hardware reset handled elsewhere)
 void ST7701_Reset()
 {
-  // If board has a reset GPIO or expander control, toggle EXIO_PIN3 (expander reset).
+/*   // If board has a reset GPIO or expander control, toggle EXIO_PIN3 (expander reset).
   // Ensure expander reset pin is configured as output and perform a short reset pulse.
   Serial.println("[DISPLAY] ST7701_Reset: asserting expander reset (EXIO_PIN3)");
   // Configure EXIO3 as output and drive low to reset the panel
@@ -443,7 +443,25 @@ void ST7701_Reset()
   // Release reset
   Set_EXIO(EXIO_PIN3, High);
   // Allow panel time to come out of reset
-  vTaskDelay(pdMS_TO_TICKS(50));
+  vTaskDelay(pdMS_TO_TICKS(50)); */
+
+  Wire.beginTransmission(0x24);
+  Wire.write(0x02);
+  Wire.write(0x00);
+  Wire.endTransmission();
+  delay(20);
+
+  Wire.beginTransmission(0x24);
+  Wire.write(0x02);
+  Wire.write(0xFF);
+  Wire.endTransmission();
+  delay(120);
+
+  Wire.beginTransmission(0x24);
+  Wire.write(0x03);
+  Wire.write(0x3A);
+  Wire.endTransmission();
+
 }
 
 bool example_on_vsync_event(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t *event_data, void *user_data)

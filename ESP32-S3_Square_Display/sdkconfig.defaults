@@ -1,0 +1,31 @@
+# Project-level ESP-IDF sdkconfig overrides for Marine Display ESP32-S3
+# These are merged into the build by PlatformIO before compilation.
+# IMPORTANT: changes here require a FULL CLEAN BUILD to take effect.
+# In PlatformIO: use "PlatformIO: Clean" first, then rebuild.
+
+# ── mbedTLS SSL record buffer reduction ──────────────────────────────────────
+# Default TLS record buffers are 16384 bytes each (in + out = 32 KB of iRAM).
+# At runtime the device only has ~29 KB of free iRAM once WiFi + LVGL are live,
+# so the SSL handshake can never start with the defaults.
+#
+# Reducing to 8192 in / 4096 out (saves ~20 KB during handshake):
+#   - 8192 is large enough for Cloudflare's server certificate chain
+#     (typically 2-4 KB per TLS record).
+#   - 4096 is sufficient for outgoing WS frames (all well under 1 KB).
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=8192
+CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
+
+# Dynamic buffer allocation: allocate record buffers on demand and free them
+# between records. Combined with SPIRAM_MALLOC_ALWAYSINTERNAL=4096, the 8192-byte
+# input buffer goes to PSRAM (>4096 threshold), saving a further 8-12 KB of iRAM
+# after the handshake completes.
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+
+# ── WiFi / lwIP PSRAM allocation ─────────────────────────────────────────────
+# WiFi management structures and lwIP protocol control blocks normally consume
+# ~20-30 KB of internal RAM. This option tells the allocator to prefer PSRAM
+# for those dynamic allocations. WiFi DMA descriptors still use internal RAM
+# (they are allocated with explicit MALLOC_CAP_DMA flags and are unaffected).
+# Combined with the mbedTLS changes above, this should raise free iRAM from
+# ~29 KB to ~50+ KB — enough headroom for SSL + HTML page building.
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y

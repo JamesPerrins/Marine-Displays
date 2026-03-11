@@ -68,6 +68,28 @@ static bool cache_owns(const uint8_t* ptr) {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ── Chunked SD read ───────────────────────────────────────────────────────────
+// A single lv_fs_read() of ~460 KB fails under WiFi load because SD DMA can only
+// chain enough internal-RAM descriptors for ~32 KB at a time when iRAM is low.
+// Reading in 16 KB chunks keeps each DMA transfer well within that limit.
+static const uint32_t SD_CHUNK = 16384;
+
+static bool read_chunked(lv_fs_file_t* f, uint8_t* buf, uint32_t total) {
+    uint32_t offset = 0;
+    while (offset < total) {
+        uint32_t want = (total - offset < SD_CHUNK) ? (total - offset) : SD_CHUNK;
+        uint32_t got = 0;
+        lv_fs_res_t r = lv_fs_read(f, buf + offset, want, &got);
+        if (r != LV_FS_RES_OK || got == 0) {
+            LV_LOG_ERROR("read_chunked: failed at offset %u (res=%d got=%u)", (unsigned)offset, (int)r, (unsigned)got);
+            return false;
+        }
+        offset += got;
+    }
+    return true;
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 static lv_res_t decoder_info(lv_img_decoder_t * decoder, const void * src, lv_img_header_t * header)
 {
     (void) decoder;
@@ -154,18 +176,17 @@ static lv_res_t decoder_open(lv_img_decoder_t * decoder, lv_img_decoder_dsc_t * 
                 return LV_RES_INV;
             }
             
-            // Read all data at once
-            uint32_t bytes_read;
-            res = lv_fs_read(&f, buf, file_size, &bytes_read);
-            lv_fs_close(&f);
-            
-            if(res != LV_FS_RES_OK || bytes_read != file_size) {
-                LV_LOG_ERROR("Failed to read file data: read %d of %d bytes", bytes_read, file_size);
+            // Read in chunks — a single large lv_fs_read fails under WiFi load
+            // because SD DMA can only chain ~32 KB of descriptors when iRAM is low.
+            if (!read_chunked(&f, buf, file_size)) {
+                LV_LOG_ERROR("Failed to read %s (%u bytes)", fn, (unsigned)file_size);
+                lv_fs_close(&f);
                 heap_caps_free(buf);
                 return LV_RES_INV;
             }
-            
-            LV_LOG_INFO("Loaded RGB565 binary: %s (%d bytes)", fn, file_size);
+            lv_fs_close(&f);
+
+            LV_LOG_INFO("Loaded RGB565 binary: %s (%u bytes)", fn, (unsigned)file_size);
 
             // Store in persistent PSRAM cache so future opens skip SD entirely
             dsc->img_data = cache_store(fn, buf, file_size);
@@ -227,15 +248,13 @@ void rgb565_preload_file(const char* lv_path)
         return;
     }
 
-    uint32_t bytes_read = 0;
-    lv_fs_res_t res = lv_fs_read(&f, buf, file_size, &bytes_read);
-    lv_fs_close(&f);
-
-    if (res != LV_FS_RES_OK || bytes_read != file_size) {
-        LV_LOG_WARN("rgb565 preload: read failed %s (%u/%u bytes)", lv_path, (unsigned)bytes_read, (unsigned)file_size);
+    if (!read_chunked(&f, buf, file_size)) {
+        LV_LOG_WARN("rgb565 preload: read failed %s (%u bytes)", lv_path, (unsigned)file_size);
+        lv_fs_close(&f);
         heap_caps_free(buf);
         return;
     }
+    lv_fs_close(&f);
 
     cache_store(lv_path, buf, file_size);
     LV_LOG_INFO("rgb565 preloaded %s (%u bytes into PSRAM)", lv_path, (unsigned)file_size);

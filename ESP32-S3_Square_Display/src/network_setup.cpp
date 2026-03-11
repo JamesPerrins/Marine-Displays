@@ -222,6 +222,8 @@ String saved_ssid = "";
 String saved_password = "";
 String saved_signalk_ip = "";
 uint16_t saved_signalk_port = 0;
+String saved_cf_client_id = "";
+String saved_cf_client_secret = "";
 // Hostname for the device (editable via Network Setup)
 String saved_hostname = "";
 // 10 SignalK paths: [screen][gauge] => idx = s*2+g
@@ -238,6 +240,16 @@ static volatile bool skip_next_load_preferences = false;
 // with the display DMA flush and corrupts heap after repeated page-builds.
 volatile bool g_pending_visual_apply = false;
 volatile bool g_screens_need_apply[5] = {false, false, false, false, false};
+// Deferred single-action flags — set by HTTP handlers (Core 1 handleClient),
+// consumed by loop() where LVGL and needle ops are safe.
+volatile int  g_pending_set_screen_idx   = -1;
+volatile bool g_pending_test_gauge       = false;
+volatile int  g_pending_test_screen_idx  = -1;
+volatile int  g_pending_test_gauge_idx   = -1;
+volatile int  g_pending_test_angle       = 0;
+volatile bool g_pending_apply_needles    = false;
+volatile bool g_pending_auto_scroll_update = false;
+volatile uint16_t g_pending_auto_scroll_sec = 0;
 // millis() timestamp of the last config page visit; reset to 0 after WS auto-resume.
 unsigned long g_config_page_last_seen = 0;
 
@@ -312,6 +324,8 @@ void save_preferences(bool skip_screen_blobs = false) {
         preferences.putString("signalk_ip", saved_signalk_ip);
         preferences.putString("hostname", saved_hostname);
         preferences.putUShort("signalk_port", saved_signalk_port);
+        preferences.putString("cf_id", saved_cf_client_id);
+        preferences.putString("cf_secret", saved_cf_client_secret);
         // Persist device settings
         preferences.putUShort("buzzer_mode", (uint16_t)buzzer_mode);
         preferences.putUShort("buzzer_cooldown", buzzer_cooldown_sec);
@@ -498,6 +512,8 @@ void load_preferences() {
         saved_password = preferences.getString("password", "");
         saved_signalk_ip = preferences.getString("signalk_ip", "openplotter.local");
         saved_signalk_port = preferences.getUShort("signalk_port", 0);
+        saved_cf_client_id = preferences.getString("cf_id", "");
+        saved_cf_client_secret = preferences.getString("cf_secret", "");
         saved_hostname = preferences.getString("hostname", "");
         // Load auto-scroll interval (seconds)
         auto_scroll_sec = preferences.getUShort("auto_scroll", 0);
@@ -2092,6 +2108,8 @@ void handle_network_page() {
     html += "<div class='form-row'><label>Password:</label><input name='password' type='password' value='" + saved_password + "'></div>";
     html += "<div class='form-row'><label>SignalK Server:</label><input name='signalk_ip' type='text' value='" + saved_signalk_ip + "'></div>";
     html += "<div class='form-row'><label>SignalK Port:</label><input name='signalk_port' type='number' value='" + String(saved_signalk_port) + "'></div>";
+    html += "<div class='form-row'><label>CF Access Client ID:</label><input name='cf_id' type='text' value='" + saved_cf_client_id + "'></div>";
+    html += "<div class='form-row'><label>CF Access Secret:</label><input name='cf_secret' type='password' value='" + saved_cf_client_secret + "'></div>";
     html += "<div class='form-row'><label>ESP32 Hostname:</label><input name='hostname' type='text' value='" + saved_hostname + "'></div>";
     html += "<div style='text-align:center;margin-top:12px;'><button class='tab-btn' type='submit' style='padding:10px 18px;'>Save & Reboot</button></div>";
     html += "</form>";
@@ -2107,6 +2125,8 @@ void handle_save_wifi() {
         saved_password = config_server.arg("password");
         saved_signalk_ip = config_server.arg("signalk_ip");
         saved_signalk_port = config_server.arg("signalk_port").toInt();
+        saved_cf_client_id = config_server.arg("cf_id");
+        saved_cf_client_secret = config_server.arg("cf_secret");
         saved_hostname = config_server.arg("hostname");
         save_preferences();
         Serial.println("[WiFi Config] SSID: " + saved_ssid);
@@ -2314,6 +2334,9 @@ void setup_network() {
         Serial.println("\nWiFi connected!");
         Serial.print("IP: ");
         Serial.println(WiFi.localIP());
+        Serial.printf("[WiFi] iRAM after connect: %u  PSRAM: %u\n",
+            heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+            heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
         // Start mDNS responder so device can be reached by hostname.local
         if (saved_hostname.length() > 0) {
             if (MDNS.begin(saved_hostname.c_str())) {
@@ -2373,6 +2396,14 @@ String get_signalk_server_ip() {
 
 uint16_t get_signalk_server_port() {
     return saved_signalk_port;
+}
+
+String get_cf_client_id() {
+    return saved_cf_client_id;
+}
+
+String get_cf_client_secret() {
+    return saved_cf_client_secret;
 }
 
 

@@ -8,6 +8,31 @@
 #include <esp_system.h>
 #include "esp_task_wdt.h"
 #include <map>
+// ── mbedTLS PSRAM allocator (linker-wrap) ────────────────────────────────────
+// Internal mbedTLS code calls esp_mbedtls_mem_calloc() directly via
+// MBEDTLS_PLATFORM_CALLOC_MACRO — bypassing mbedtls_platform_set_calloc_free().
+// Wrapping esp_mbedtls_mem_calloc at link time intercepts ALL mbedTLS heap
+// allocations, including in the pre-compiled libmbedcrypto.a.
+// Blocks ≥4KB (the two 16KB SSL record buffers) go to PSRAM, leaving the ~30KB
+// iRAM for SSL context structs and certificate chain parsing.
+// Build flag: -Wl,--wrap=esp_mbedtls_mem_calloc -Wl,--wrap=esp_mbedtls_mem_free
+extern "C" void* __real_esp_mbedtls_mem_calloc(size_t n, size_t size);
+extern "C" void  __real_esp_mbedtls_mem_free(void* ptr);
+
+extern "C" void* __wrap_esp_mbedtls_mem_calloc(size_t n, size_t size) {
+    size_t total = n * size;
+    if (total >= 4096) {
+        void* p = heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (p) return p;
+        // PSRAM full: fall through to internal RAM
+    }
+    return __real_esp_mbedtls_mem_calloc(n, size);
+}
+
+extern "C" void __wrap_esp_mbedtls_mem_free(void* ptr) {
+    heap_caps_free(ptr);
+}
+// ─────────────────────────────────────────────────────────────────────────────
 
 // Global array to hold all sensor values (10 parameters)
 float g_sensor_values[TOTAL_PARAMS] = {
@@ -40,10 +65,17 @@ static std::map<String, float> extended_sensor_values;
 static std::map<String, String> extended_sensor_units;
 static std::map<String, String> extended_sensor_descriptions;
 
+// Cached subscription path list — populated at connect time so the TEXT
+// handler can filter incoming values to only subscribed paths, preventing
+// the server's full-state broadcast from filling the extended map with
+// thousands of unsubscribed paths and draining iRAM.
+static std::vector<String> s_subscribed_paths;
+
 // WiFi and HTTP client (static to this file)
 static WebSocketsClient ws_client;
 static String server_ip_str = "";
 static uint16_t server_port_num = 0;
+static bool use_ssl = false;
 static String signalk_paths[TOTAL_PARAMS];  // Array of 10 paths
 static TaskHandle_t signalk_task_handle = NULL;
 static bool signalk_enabled = false;
@@ -51,6 +83,9 @@ static bool signalk_enabled = false;
 // signalk_task (Core 0) sees this, disconnects the WS, and suspends reconnects
 // until the flag is cleared on save — freeing the ~22KB WS receive buffer.
 static volatile bool g_signalk_ws_paused = false;
+// Persistent buffer for setExtraHeaders — must outlive ws_connect() so the
+// WebSocket library can safely read it when sending the HTTP upgrade request.
+static String ws_extra_headers;
 
 // Set by resume_signalk_ws() to tell signalk_task to reconnect once iRAM > 20KB.
 // signalk_task clears both this and g_signalk_ws_paused when the threshold is met.
@@ -108,6 +143,50 @@ static void flush_outgoing() {
 void enqueue_signalk_message(const String &msg) {
     if (ws_queue_mutex == NULL) return;
     enqueue_outgoing(msg);
+}
+
+static void wsEvent(WStype_t type, uint8_t * payload, size_t length); // forward declaration
+
+// Connect (or reconnect) WebSocket, using SSL when port is 443
+static void ws_connect() {
+    // Always disconnect first so any pending TCP/SSL socket is closed cleanly
+    // before we reinitialise. Without this, repeated beginSSL() calls abandon
+    // in-progress handshakes without freeing the SSL context, leaking heap.
+    ws_client.disconnect();
+    if (use_ssl) {
+        // Check DNS resolves before attempting SSL (fast failure diagnostic)
+        IPAddress resolved;
+        bool dns_ok = WiFi.hostByName(server_ip_str.c_str(), resolved);
+        Serial.printf("[SK] DNS: %s -> %s (%s)  iRAM=%u\n",
+            server_ip_str.c_str(), resolved.toString().c_str(),
+            dns_ok ? "OK" : "FAIL",
+            heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+        // NULL CA cert + NULL fingerprint causes the library to call setInsecure()
+        // internally, accepting self-signed/Cloudflare certificates
+        // ?subscribe=none tells the server to start with zero default subscriptions.
+        // Without this the server pushes ALL known paths on connect; our explicit
+        // subscribe message then becomes the only active subscription.
+        ws_client.beginSSL(server_ip_str.c_str(), server_port_num, "/signalk/v1/stream?subscribe=none");
+        Serial.println("Signal K: connecting via WSS (SSL)");
+    } else {
+        ws_client.begin(server_ip_str.c_str(), server_port_num, "/signalk/v1/stream?subscribe=none");
+        Serial.println("Signal K: connecting via WS (plain)");
+    }
+    ws_client.onEvent(wsEvent);
+    ws_client.setReconnectInterval(0);  // disable library reconnect - we manage it ourselves
+    // Build extra headers: Origin always, plus CF Access tokens if configured.
+    // ws_extra_headers is file-scope static so the pointer stays valid after
+    // ws_connect() returns — the WebSocket library reads it lazily on loop().
+    String origin = String(use_ssl ? "https://" : "http://") + server_ip_str;
+    ws_extra_headers = "Origin: " + origin;
+    String cf_id = get_cf_client_id();
+    String cf_secret = get_cf_client_secret();
+    if (cf_id.length() > 0 && cf_secret.length() > 0) {
+        ws_extra_headers += "\r\nCF-Access-Client-Id: " + cf_id;
+        ws_extra_headers += "\r\nCF-Access-Client-Secret: " + cf_secret;
+        Serial.println("Signal K: CF Access headers added");
+    }
+    ws_client.setExtraHeaders(ws_extra_headers.c_str());
 }
 
 // Convert dot-delimited Signal K path to REST URL form
@@ -363,17 +442,23 @@ void init_sensor_mutex() {
 // WebSocket event handler
 static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
     if (type == WStype_CONNECTED) {
-        Serial.println("Signal K: WebSocket connected");
+        Serial.printf("Signal K: WebSocket connected  iRAM=%u PSRAM=%u\n",
+            heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+            heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
         last_message_time = millis();
         // reset backoff on successful connect
         current_backoff_ms = RECONNECT_BASE_MS;
         // Build subscription JSON for ALL configured paths (gauge, number, dual, quad, gauge+num, graph)
         // Manual string build avoids DynamicJsonDocument's 2048B iRAM alloc in the WS connect handler.
         std::vector<String> all_conn_paths = get_all_signalk_paths();
+        // Cache for TEXT handler path filter
+        s_subscribed_paths = all_conn_paths;
+        Serial.printf("[SK] Subscribing to %u paths:\n", (unsigned)all_conn_paths.size());
         String out = "{\"context\":\"vessels.self\",\"subscribe\":[";
         bool first_conn = true;
         for (const String& p : all_conn_paths) {
             if (p.length() > 0) {
+                Serial.printf("[SK]   %s\n", p.c_str());
                 if (!first_conn) out += ",";
                 out += "{\"path\":\"";
                 out += p;
@@ -382,23 +467,58 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
             }
         }
         out += "]}";
+        if (first_conn) {
+            Serial.println("[SK WARN] No paths to subscribe — check gauge/screen config");
+        }
         ws_client.sendTXT(out);
         // flush any queued outgoing messages (resubscribe, etc)
         flush_outgoing();
-        
+
         // Fetch metadata for all configured paths via REST API
-        fetch_all_metadata();
-        
+        //fetch_all_metadata();
+
         return;
     }
 
     if (type == WStype_TEXT) {
         last_message_time = millis();
-        String msg = String((char*)payload, length);
-        
-        // Parse incoming JSON and look for updates->values
-        DynamicJsonDocument doc(4096);
-        DeserializationError err = deserializeJson(doc, msg);
+
+        // Log the first few messages in full so we can see what the server sends,
+        // then switch to periodic memory-only logging to avoid serial flooding.
+        static int msg_count = 0;
+        msg_count++;
+        if (msg_count <= 5) {
+            // Print first 160 chars of each of the first 5 messages
+            int preview = (length < 160) ? (int)length : 160;
+            Serial.printf("[SK MSG #%d len=%u] %.*s%s\n",
+                msg_count, (unsigned)length, preview, (const char*)payload,
+                (length > 160 ? "..." : ""));
+        }
+
+        // Periodic iRAM diagnostic: log every 30 s to catch slow leaks without flooding serial.
+        static unsigned long last_mem_log = 0;
+        unsigned long now_ms = millis();
+        if (now_ms - last_mem_log >= 30000) {
+            last_mem_log = now_ms;
+            Serial.printf("[SK MEM] iRAM=%u PSRAM=%u msg_len=%u total_msgs=%d\n",
+                heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                (unsigned)length, msg_count);
+        }
+        // Warn if iRAM drops below 15 KB — crash is likely imminent.
+        // (Normal operating level with SSL via PSRAM is ~23KB; 15KB is the danger zone.)
+        if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL) < 15360) {
+            Serial.printf("[SK WARN] LOW iRAM=%u PSRAM=%u\n",
+                heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+        }
+
+        // Parse incoming JSON and look for updates->values.
+        // Use 8192-byte capacity so malloc(8192) > SPIRAM_MALLOC_ALWAYSINTERNAL(4096)
+        // threshold → pool allocated from PSRAM instead of internal RAM.
+        // Parse directly from the payload buffer to avoid an extra String copy.
+        DynamicJsonDocument doc(8192);
+        DeserializationError err = deserializeJson(doc, (const char*)payload, length);
         if (err) {
             Serial.printf("[SIGNALK] JSON parse error: %s\n", err.c_str());
             return;
@@ -430,7 +550,14 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
                     }
 
                     float value = val["value"].as<float>();
-                    
+
+                    // Log first 20 value updates so we can confirm data is flowing
+                    static int val_log_count = 0;
+                    if (val_log_count < 20) {
+                        val_log_count++;
+                        Serial.printf("[SK VAL] %s = %.4f\n", path, value);
+                    }
+
                     // Check if this path matches any gauge path
                     bool found_in_gauge = false;
                     for (int i = 0; i < TOTAL_PARAMS; i++) {
@@ -440,11 +567,20 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
                             // Don't break - continue to update ALL matching path indices
                         }
                     }
-                    
-                    // If not in gauge paths, store in extended map (for number/dual displays)
-                    if (!found_in_gauge && sensor_mutex != NULL && xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(50))) {
-                        extended_sensor_values[String(path)] = value;
-                        xSemaphoreGive(sensor_mutex);
+
+                    // Only store in extended map if the path is in our subscription list.
+                    // The server sends a full state broadcast on connect; without this
+                    // filter every unsubscribed path (design.draft, etc.) would allocate
+                    // a map node in internal RAM and drain the ~23KB we have available.
+                    if (!found_in_gauge) {
+                        bool is_subscribed = false;
+                        for (const String& sp : s_subscribed_paths) {
+                            if (sp.equals(path)) { is_subscribed = true; break; }
+                        }
+                        if (is_subscribed && sensor_mutex != NULL && xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(50))) {
+                            extended_sensor_values[String(path)] = value;
+                            xSemaphoreGive(sensor_mutex);
+                        }
                     }
                 }
             }
@@ -453,6 +589,16 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
     // handle pong or ping responses if available
     if (type == WStype_PONG) {
         last_message_time = millis();
+    }
+    if (type == WStype_DISCONNECTED) {
+        Serial.printf("[SK] Disconnected  iRAM=%u PSRAM=%u\n",
+            heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+            heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    }
+    if (type == WStype_ERROR) {
+        Serial.printf("[SK] WS error  iRAM=%u  detail=%.*s\n",
+            heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+            (int)length, payload ? (char*)payload : "(none)");
     }
 }
 
@@ -512,19 +658,28 @@ static void signalk_task(void *parameter) {
         } else {
             // Not connected: attempt reconnect when scheduled
             if (next_reconnect_at == 0) {
-                // first time; schedule immediate try
-                next_reconnect_at = now + current_backoff_ms;
+                // First pass: enable_signalk() already called ws_connect() before
+                // the task started. Give the SSL+WebSocket handshake 10 s to
+                // complete (Cloudflare TLS takes 3-5 s) before we declare failure
+                // and restart. A 2 s window caused repeated beginSSL() calls that
+                // abandoned in-progress handshakes and leaked the SSL context.
+                next_reconnect_at = now + 10000;
             }
             if (now >= next_reconnect_at) {
-                // re-init client
-                ws_client.begin(server_ip_str.c_str(), server_port_num, "/signalk/v1/stream");
-                ws_client.onEvent(wsEvent);
+                ws_connect();
                 last_reconnect_attempt = now;
                 // schedule next if this fails
                 unsigned int jitter = (esp_random() & 0x7FF) % 1000;
                 next_reconnect_at = now + current_backoff_ms + jitter;
                 current_backoff_ms = min(current_backoff_ms * 2, RECONNECT_MAX_MS);
             }
+        }
+
+        // Log stack high-water-mark every 15s to detect stack overflow risk
+        static unsigned long last_hwm_log = 0;
+        if (millis() - last_hwm_log >= 15000) {
+            last_hwm_log = millis();
+            Serial.printf("[SK] Stack HWM: %u bytes free\n", uxTaskGetStackHighWaterMark(NULL));
         }
 
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -544,7 +699,8 @@ void enable_signalk(const char* ssid, const char* password, const char* server_i
     signalk_enabled = true;
     server_ip_str = server_ip;
     server_port_num = server_port;
-    
+    use_ssl = (server_port == 443);
+
     // Get all paths from configuration including gauges, number displays, and dual displays
     std::vector<String> all_paths = get_all_signalk_paths();
     
@@ -569,25 +725,15 @@ void enable_signalk(const char* ssid, const char* password, const char* server_i
     Serial.println("Signal K: Starting WebSocket client...");
 
     // Initialize websocket client
-    ws_client.begin(server_ip_str.c_str(), server_port_num, "/signalk/v1/stream");
-    ws_client.onEvent(wsEvent);
-    // We'll manage reconnection with backoff ourselves
-    ws_client.setReconnectInterval(0);
+    ws_connect();
 
     // Create task to pump ws loop.
-    // Allocate the 8KB stack in PSRAM so it doesn't consume internal RAM.
-    // StaticTask_t TCB must stay in internal RAM (FreeRTOS requirement).
-    static StaticTask_t sk_tcb;
-    uint8_t* sk_stack = (uint8_t*)heap_caps_malloc(8192, MALLOC_CAP_SPIRAM);
-    if (sk_stack == nullptr) {
-        // Fallback to internal RAM if PSRAM allocation fails
-        Serial.println("[SK] PSRAM stack alloc failed, using internal RAM");
-        xTaskCreatePinnedToCore(signalk_task, "SignalKWS", 8192, NULL, 3, &signalk_task_handle, 0);
-    } else {
-        signalk_task_handle = xTaskCreateStaticPinnedToCore(
-            signalk_task, "SignalKWS", 8192, NULL, 3,
-            sk_stack, &sk_tcb, 0
-        );
+    // FreeRTOS requires task stacks in internal RAM (xPortcheckValidStackMem asserts
+    // on PSRAM pointers). Use xTaskCreatePinnedToCore so the stack is allocated via
+    // pvPortMalloc which draws from internal heap regardless of SPIRAM thresholds.
+    xTaskCreatePinnedToCore(signalk_task, "SignalKWS", 16384, NULL, 3, &signalk_task_handle, 0);
+    if (signalk_task_handle == NULL) {
+        Serial.println("[SK] Failed to create SignalK task - out of internal RAM");
     }
 
     Serial.println("Signal K WebSocket task created successfully");

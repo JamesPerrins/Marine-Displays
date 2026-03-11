@@ -4,7 +4,12 @@
 #include "I2C_Driver.h"
 #include "TCA9554PWR.h"
 
-#define GT911_ADDR          0x5D
+// GT911 has two possible I2C addresses depending on board revision:
+// v3 boards use 0x5D, v4 boards use 0x14.  Detected at runtime in Touch_Init().
+#define GT911_ADDR_PRIMARY   0x5D
+#define GT911_ADDR_SECONDARY 0x14
+extern uint8_t gt911_addr;            // set by Touch_Init() auto-detect
+#define GT911_ADDR           gt911_addr
 #define GT911_INT_PIN       16
 
 

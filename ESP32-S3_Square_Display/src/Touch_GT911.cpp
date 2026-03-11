@@ -1,4 +1,8 @@
 #include "Touch_GT911.h"
+
+// Runtime GT911 I2C address — set by Touch_Init() auto-detect
+uint8_t gt911_addr = GT911_ADDR_PRIMARY;
+
 struct GT911_Touch touch_data = {0};
 
 
@@ -36,6 +40,23 @@ bool I2C_Write_Touch(uint8_t Driver_addr, uint16_t Reg_addr, const uint8_t *Reg_
 uint8_t Touch_Init(void) {
 
   GT911_Touch_Reset();
+
+  // Auto-detect GT911 I2C address (v3=0x5D, v4=0x14)
+  Wire.beginTransmission(GT911_ADDR_PRIMARY);
+  if (Wire.endTransmission() == 0) {
+    gt911_addr = GT911_ADDR_PRIMARY;
+    printf("[TOUCH] GT911 found at 0x%02X (v3 board)\n", gt911_addr);
+  } else {
+    Wire.beginTransmission(GT911_ADDR_SECONDARY);
+    if (Wire.endTransmission() == 0) {
+      gt911_addr = GT911_ADDR_SECONDARY;
+      printf("[TOUCH] GT911 found at 0x%02X (v4 board)\n", gt911_addr);
+    } else {
+      gt911_addr = GT911_ADDR_PRIMARY;
+      printf("[TOUCH] GT911 not found at either address, defaulting to 0x%02X\n", gt911_addr);
+    }
+  }
+
   GT911_Read_cfg();
 
   attachInterrupt(GT911_INT_PIN, Touch_GT911_ISR, interrupt); 

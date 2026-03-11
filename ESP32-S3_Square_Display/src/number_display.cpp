@@ -2,6 +2,7 @@
 #include "ui.h"
 #include "screen_config_c_api.h"
 #include <Arduino.h>
+#include <esp_attr.h>
 
 // Storage for number display labels (one per screen)
 static lv_obj_t* number_labels[NUM_SCREENS] = {NULL, NULL, NULL, NULL, NULL};
@@ -10,9 +11,10 @@ static lv_obj_t* description_labels[NUM_SCREENS] = {NULL, NULL, NULL, NULL, NULL
 static lv_obj_t* bg_panels[NUM_SCREENS] = {NULL, NULL, NULL, NULL, NULL};
 
 // Previous values for change detection to avoid unnecessary redraws
-static char prev_number_text[NUM_SCREENS][32] = {0};
-static char prev_unit_text[NUM_SCREENS][32] = {0};
-static char prev_description_text[NUM_SCREENS][128] = {0};
+// EXT_RAM_ATTR → PSRAM, freeing ~960 bytes of internal RAM
+EXT_RAM_ATTR static char prev_number_text[NUM_SCREENS][32];
+EXT_RAM_ATTR static char prev_unit_text[NUM_SCREENS][32];
+EXT_RAM_ATTR static char prev_description_text[NUM_SCREENS][128];
 
 // Helper to convert hex color string to lv_color_t
 static lv_color_t hex_to_lv_color(const char* hex) {

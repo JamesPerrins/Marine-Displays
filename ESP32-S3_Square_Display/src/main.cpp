@@ -1564,16 +1564,56 @@ void loop() {
     // Deferred LVGL rebuild: HTTP save handlers set this flag instead of calling
     // apply_all_screen_visuals() directly (which would race with DMA flush).
     // We consume it here, just before lv_timer_handler(), when LVGL is idle.
+    //
+    // IMPORTANT: DO NOT call apply_all_screen_visuals() here — that function
+    // unconditionally marks ALL 5 screens for lazy-apply.  When only one
+    // screen was saved we must honour the save handler's targeted flag so
+    // unchanged screens are never rebuilt (each redundant rebuild leaks
+    // ~500 KB of PSRAM in LVGL objects and eventually causes a crash).
     if (g_pending_visual_apply) {
         g_pending_visual_apply = false;
-        Serial.println("[LOOP] calling apply_all_screen_visuals");
+        int active = ui_get_current_screen() - 1; // 0-based
+        Serial.printf("[LOOP] deferred apply, active screen=%d\n", active);
         Serial.flush();
-        apply_all_screen_visuals();
-        Serial.println("[LOOP] apply_all_screen_visuals returned");
+        // Apply the active screen immediately if it was flagged.
+        // Non-active flagged screens stay flagged; the lazy-apply in the
+        // needle-update section will apply them when the user swipes over.
+        if (active >= 0 && active < NUM_SCREENS && g_screens_need_apply[active]) {
+            g_screens_need_apply[active] = false;
+            apply_screen_visuals_for_one(active);
+        }
+        Serial.println("[LOOP] deferred apply complete");
         Serial.flush();
+        // Don't resume WS here — the user is likely still editing the config
+        // page and the next tab click would immediately re-pause, creating a
+        // connect→disconnect→TIME_WAIT cycle that crashes the next fragment.
+        // The 10-second idle watchdog below handles resuming WS after the user
+        // stops accessing the config page.
     }
 
     Lvgl_Loop();
+
+    // WS idle watchdog: resume WS automatically once the config page has been
+    // idle for 10 seconds.  This is the ONLY path that resumes WS after a save —
+    // the save handler deliberately does NOT schedule a resume because the user
+    // typically clicks another tab immediately, and a connect→disconnect→TIME_WAIT
+    // cycle from a brief reconnect crashes the next fragment.
+    {
+        static unsigned long last_ws_watchdog = 0;
+        unsigned long now_wd = millis();
+        if (now_wd - last_ws_watchdog >= 2000UL) {
+            last_ws_watchdog = now_wd;
+            if (is_signalk_ws_paused()
+                    && !g_signalk_ws_resume_pending
+                    && g_config_page_last_seen != 0
+                    && (now_wd - g_config_page_last_seen) >= 10000UL) {
+                Serial.printf("[SK] Config page idle >10s (iRAM=%u), auto-resuming WS\n",
+                              heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+                g_config_page_last_seen = 0;
+                resume_signalk_ws();
+            }
+        }
+    }
 
     // Maintain TCA9554 PIN6 LOW (buzzer OFF, active-HIGH circuit) every 50ms.
     // esp_io_expander_new_i2c_tca9554 resets CONFIG=0xFF (all inputs) during LCD_Init;

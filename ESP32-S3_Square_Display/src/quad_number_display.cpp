@@ -2,6 +2,7 @@
 #include "screen_config_c_api.h"
 #include "ui.h"
 #include <stdio.h>
+#include <esp_attr.h>
 
 // Storage for quad display components (top-left, top-right, bottom-left, bottom-right for each screen)
 static lv_obj_t* quad_tl_labels[NUM_SCREENS] = {nullptr};
@@ -32,18 +33,19 @@ static lv_obj_t* get_screen_obj(int screen_num) {
 }
 
 // Previous values for change detection
-static char prev_quad_tl_text[NUM_SCREENS][64] = {0};
-static char prev_quad_tl_unit[NUM_SCREENS][32] = {0};
-static char prev_quad_tl_description[NUM_SCREENS][128] = {0};
-static char prev_quad_tr_text[NUM_SCREENS][64] = {0};
-static char prev_quad_tr_unit[NUM_SCREENS][32] = {0};
-static char prev_quad_tr_description[NUM_SCREENS][128] = {0};
-static char prev_quad_bl_text[NUM_SCREENS][64] = {0};
-static char prev_quad_bl_unit[NUM_SCREENS][32] = {0};
-static char prev_quad_bl_description[NUM_SCREENS][128] = {0};
-static char prev_quad_br_text[NUM_SCREENS][64] = {0};
-static char prev_quad_br_unit[NUM_SCREENS][32] = {0};
-static char prev_quad_br_description[NUM_SCREENS][128] = {0};
+// EXT_RAM_ATTR → PSRAM, freeing ~4.5 KB of internal RAM
+EXT_RAM_ATTR static char prev_quad_tl_text[NUM_SCREENS][64];
+EXT_RAM_ATTR static char prev_quad_tl_unit[NUM_SCREENS][32];
+EXT_RAM_ATTR static char prev_quad_tl_description[NUM_SCREENS][128];
+EXT_RAM_ATTR static char prev_quad_tr_text[NUM_SCREENS][64];
+EXT_RAM_ATTR static char prev_quad_tr_unit[NUM_SCREENS][32];
+EXT_RAM_ATTR static char prev_quad_tr_description[NUM_SCREENS][128];
+EXT_RAM_ATTR static char prev_quad_bl_text[NUM_SCREENS][64];
+EXT_RAM_ATTR static char prev_quad_bl_unit[NUM_SCREENS][32];
+EXT_RAM_ATTR static char prev_quad_bl_description[NUM_SCREENS][128];
+EXT_RAM_ATTR static char prev_quad_br_text[NUM_SCREENS][64];
+EXT_RAM_ATTR static char prev_quad_br_unit[NUM_SCREENS][32];
+EXT_RAM_ATTR static char prev_quad_br_description[NUM_SCREENS][128];
 
 // Font size to zoom mapping - all native fonts, no scaling (LVGL uses 256 as 100% scale)
 static int font_size_to_zoom(uint8_t font_size) {

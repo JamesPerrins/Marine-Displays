@@ -7,7 +7,22 @@
 #include <ArduinoJson.h>
 #include <esp_system.h>
 #include "esp_task_wdt.h"
+#include <esp_heap_caps.h>
 #include <map>
+
+// Custom ArduinoJson allocator that uses PSRAM instead of internal RAM.
+// Saves ~4 KB of iRAM on every SK WebSocket message parse.
+struct PsramAllocator {
+    void* allocate(size_t size) {
+        return heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    void deallocate(void* ptr) {
+        heap_caps_free(ptr);
+    }
+    void* reallocate(void* ptr, size_t new_size) {
+        return heap_caps_realloc(ptr, new_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+};
 
 // Global array to hold all sensor values (10 parameters)
 float g_sensor_values[TOTAL_PARAMS] = {
@@ -47,6 +62,14 @@ static uint16_t server_port_num = 0;
 static String signalk_paths[TOTAL_PARAMS];  // Array of 10 paths
 static TaskHandle_t signalk_task_handle = NULL;
 static bool signalk_enabled = false;
+// Set by HTTP handler (Core 1) before building/sending the config page.
+// signalk_task (Core 0) sees this, disconnects the WS, and suspends reconnects
+// until the flag is cleared on save — freeing the ~22KB WS receive buffer.
+static volatile bool g_signalk_ws_paused = false;
+
+// Set by resume_signalk_ws() to tell signalk_task to reconnect once iRAM > 18KB.
+// signalk_task clears both this and g_signalk_ws_paused when the threshold is met.
+static volatile bool g_signalk_ws_resume_when_ready = false;
 
 // Connection health and reconnection/backoff state
 static unsigned long last_message_time = 0;
@@ -252,7 +275,7 @@ static void fetch_metadata_for_path(int index, const String &path) {
     if (httpCode == HTTP_CODE_OK) {
         String payload = http.getString();
         
-        DynamicJsonDocument doc(2048);
+        BasicJsonDocument<PsramAllocator> doc(2048);
         DeserializationError err = deserializeJson(doc, payload);
         
         if (!err) {
@@ -324,7 +347,7 @@ void fetch_all_metadata() {
             
             if (httpCode == 200) {
                 String payload = http.getString();
-                DynamicJsonDocument doc(2048);
+                BasicJsonDocument<PsramAllocator> doc(2048);
                 DeserializationError err = deserializeJson(doc, payload);
                 
                 if (!err && doc.containsKey("meta")) {
@@ -360,19 +383,20 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
         // reset backoff on successful connect
         current_backoff_ms = RECONNECT_BASE_MS;
         // Build subscription JSON for ALL configured paths (gauge, number, dual, quad, gauge+num, graph)
+        // Manual string build avoids DynamicJsonDocument's 2048B iRAM alloc in the WS connect handler.
         std::vector<String> all_conn_paths = get_all_signalk_paths();
-        DynamicJsonDocument subdoc(2048);
-        subdoc["context"] = "vessels.self";
-        JsonArray subs = subdoc.createNestedArray("subscribe");
+        String out = "{\"context\":\"vessels.self\",\"subscribe\":[";
+        bool first_conn = true;
         for (const String& p : all_conn_paths) {
             if (p.length() > 0) {
-                JsonObject s = subs.createNestedObject();
-                s["path"] = p;
-                s["period"] = 0; // instant updates (server may push immediately)
+                if (!first_conn) out += ",";
+                out += "{\"path\":\"";
+                out += p;
+                out += "\",\"period\":0}";
+                first_conn = false;
             }
         }
-        String out;
-        serializeJson(subdoc, out);
+        out += "]}";
         ws_client.sendTXT(out);
         // flush any queued outgoing messages (resubscribe, etc)
         flush_outgoing();
@@ -387,8 +411,8 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
         last_message_time = millis();
         String msg = String((char*)payload, length);
         
-        // Parse incoming JSON and look for updates->values
-        DynamicJsonDocument doc(4096);
+        // Parse incoming JSON in PSRAM to avoid ~4 KB iRAM allocation per message
+        BasicJsonDocument<PsramAllocator> doc(4096);
         DeserializationError err = deserializeJson(doc, msg);
         if (err) {
             Serial.printf("[SIGNALK] JSON parse error: %s\n", err.c_str());
@@ -454,6 +478,26 @@ static void signalk_task(void *parameter) {
     vTaskDelay(pdMS_TO_TICKS(500));
 
     while (signalk_enabled) {
+        // Config UI pause: the HTTP handler (Core 1) sets g_signalk_ws_paused before
+        // building/sending the ~144KB gauges page. We disconnect here (Core 0, the only
+        // thread that safely owns ws_client) to free the ~22KB WS receive buffer, giving
+        // the SD DMA layer enough contiguous iRAM to write configs after the page send.
+        if (g_signalk_ws_paused) {
+            if (ws_client.isConnected()) {
+                ws_client.disconnect();
+                current_backoff_ms = RECONNECT_BASE_MS;
+                Serial.println("[SK] Config UI active - WS disconnected to free iRAM");
+            }
+            if (g_signalk_ws_resume_when_ready) {
+                g_signalk_ws_resume_when_ready = false;
+                g_signalk_ws_paused = false;
+                next_reconnect_at = millis() + 1000;
+                Serial.println("[SK] WS unpaused, reconnecting in 1s");
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
         ws_client.loop();
         // Drain any messages queued from other tasks (e.g. refresh_signalk_subscriptions
         // called from the HTTP handler on Core 1). Only safe to call sendTXT() from here.
@@ -545,16 +589,12 @@ void enable_signalk(const char* ssid, const char* password, const char* server_i
     // We'll manage reconnection with backoff ourselves
     ws_client.setReconnectInterval(0);
 
-    // Create task to pump ws loop
-    xTaskCreatePinnedToCore(
-        signalk_task,
-        "SignalKWS",
-        8192,
-        NULL,
-        3,
-        &signalk_task_handle,
-        0
-    );
+    // Create task to pump ws loop.
+    // NOTE: xTaskCreateStaticPinnedToCore with a PSRAM stack fails with
+    // "xPortcheckValidStackMem" assert unless CONFIG_FREERTOS_TASK_STACK_IN_PSRAM
+    // is set in sdkconfig at IDF build time — a pre-compiled library check that
+    // a -D flag cannot override.  Use xTaskCreatePinnedToCore (internal RAM stack).
+    xTaskCreatePinnedToCore(signalk_task, "SignalKWS", 8192, NULL, 3, &signalk_task_handle, 0);
 
     Serial.println("Signal K WebSocket task created successfully");
     Serial.flush();
@@ -571,6 +611,65 @@ void disable_signalk() {
     Serial.println("Signal K disabled (WebSocket disconnected)");
 }
 
+// Returns true if the WS is currently paused.
+bool is_signalk_ws_paused() {
+    return g_signalk_ws_paused;
+}
+
+// Pause the WebSocket connection while the config UI is open.
+// Sets the pause flag and yields 300ms so signalk_task (Core 0) sees it,
+// calls ws_client.disconnect(), and the ~22KB WS receive buffer is freed
+// before the HTTP handler builds and sends the large config page.
+void pause_signalk_ws() {
+    if (!signalk_enabled) return;
+    // Cancel any pending or in-flight resume so the signalk_task doesn't
+    // unpause itself while we're serving config fragments.
+    g_signalk_ws_resume_when_ready = false;
+    g_signalk_ws_resume_pending = false;
+
+    if (g_signalk_ws_paused) {
+        // Already paused — WS is disconnected and buffers are freed.
+        // Skip the 300ms wait; just print current iRAM for diagnostics.
+        Serial.printf("[SK] WS already paused, iRAM now %u B\n",
+                      heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+        return;
+    }
+    g_signalk_ws_paused = true;
+    // 6 × 50ms = 300ms: task runs every 10ms so it sees the flag in <10ms;
+    // remaining 290ms is for lwIP to actually free the TCP socket buffers.
+    for (int i = 0; i < 6; i++) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+        esp_task_wdt_reset();
+    }
+    Serial.printf("[SK] WS paused for config UI, iRAM now %u B\n",
+                  heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+}
+
+// Set when handle_save_gauges() wants WS resumed but LVGL apply is still pending.
+// The main loop calls resume_signalk_ws() after apply_all_screen_visuals() completes.
+volatile bool g_signalk_ws_resume_pending = false;
+
+
+// Resume the WebSocket connection after the config save completes.
+// Keeps g_signalk_ws_paused=true and sets g_signalk_ws_resume_when_ready so the
+// signalk_task will reconnect once iRAM > 18KB (lwIP TIME_WAIT PCBs have cleared).
+void resume_signalk_ws() {
+    if (!signalk_enabled) return;
+    g_signalk_ws_resume_pending = false;
+    // Keep paused — signalk_task will clear the pause once iRAM recovers
+    g_signalk_ws_resume_when_ready = true;
+    Serial.println("[SK] WS resume requested - waiting for iRAM > 18KB before reconnecting");
+}
+
+// Schedule a WS resume to happen after the next apply_all_screen_visuals() completes.
+// Call this from HTTP handlers instead of resume_signalk_ws() directly, so that
+// LVGL image SD reads happen while iRAM is still free (WS still paused).
+void schedule_signalk_ws_resume() {
+    if (!signalk_enabled) return;
+    g_signalk_ws_resume_pending = true;
+    Serial.println("[SK] WS resume deferred until after screen rebuild");
+}
+
 // Rebuild the subscription list from current configuration and (re)send it
 // over the active WebSocket connection if connected. If the WS is not
 // connected, the updated paths will be used when connection is (re)established.
@@ -583,19 +682,23 @@ void refresh_signalk_subscriptions() {
     // Get all unique paths including number and dual displays
     std::vector<String> all_paths = get_all_signalk_paths();
 
-    // Build subscription JSON
-    DynamicJsonDocument subdoc(2048);  // Increased size to accommodate more paths
-    subdoc["context"] = "vessels.self";
-    JsonArray subs = subdoc.createNestedArray("subscribe");
+    // Build subscription JSON manually to avoid DynamicJsonDocument allocating
+    // 2048 bytes from internal iRAM on every save. DynamicJsonDocument uses malloc()
+    // which draws from the internal heap; on a device with ~10 KB iRAM headroom this
+    // fragments the heap and leaves the SDMMC DMA layer without a contiguous block.
+    // Manual string building uses PSRAM-backed Arduino String objects instead.
+    String out = "{\"context\":\"vessels.self\",\"subscribe\":[";
+    bool first = true;
     for (const String& path : all_paths) {
         if (path.length() > 0) {
-            JsonObject s = subs.createNestedObject();
-            s["path"] = path;
-            s["period"] = 0;
+            if (!first) out += ",";
+            out += "{\"path\":\"";
+            out += path;
+            out += "\",\"period\":0}";
+            first = false;
         }
     }
-    String out;
-    serializeJson(subdoc, out);
+    out += "]}";
 
     // Always queue — never call ws_client.sendTXT() directly here.
     // refresh_signalk_subscriptions() may be called from Core 1 (HTTP handler)

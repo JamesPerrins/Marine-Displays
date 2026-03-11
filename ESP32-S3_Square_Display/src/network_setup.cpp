@@ -22,8 +22,22 @@
 
 // Place fallback/error screen logic after all includes and config loads
 extern "C" void show_fallback_error_screen_if_needed() {
+    // A screen is considered configured if ANY of the following are non-default:
+    //   - display_type != GAUGE (NUMBER/DUAL/QUAD/GRAPH/COMPASS/POSITION have no cal points)
+    //   - background_path set
+    //   - icon_paths set
+    //   - number_path / dual_top_path / quad paths set  (NUMBER/DUAL/QUAD screens)
+    //   - calibration angles set                        (GAUGE screens with custom cal)
+    // Checking ONLY cal angles gives false positives for screens that use default
+    // linear mapping or non-gauge display types.
     bool all_default = true;
     for (int s = 0; s < NUM_SCREENS && all_default; ++s) {
+        if (screen_configs[s].display_type != 0) { all_default = false; break; }
+        if (screen_configs[s].background_path[0] != '\0') { all_default = false; break; }
+        if (screen_configs[s].icon_paths[0][0] != '\0') { all_default = false; break; }
+        if (screen_configs[s].icon_paths[1][0] != '\0') { all_default = false; break; }
+        if (screen_configs[s].number_path[0] != '\0') { all_default = false; break; }
+        if (screen_configs[s].dual_top_path[0] != '\0') { all_default = false; break; }
         for (int g = 0; g < 2 && all_default; ++g) {
             for (int p = 0; p < 5; ++p) {
                 if (screen_configs[s].cal[g][p].angle != 0 || screen_configs[s].cal[g][p].value != 0.0f) {
@@ -130,8 +144,10 @@ static String safeStr(const char* s, size_t maxlen = 128) {
     return result;
 }
 
-// Minimal HTML style used by the configuration web pages
-const String STYLE = R"rawliteral(
+// Minimal HTML style used by the configuration web pages.
+// Stored as a plain const char[] so the data stays in flash (.rodata)
+// instead of being heap-copied like a const String would be (~2.8 KB saved).
+static const char STYLE[] PROGMEM = R"rawliteral(
 <style>
 body{font-family:Arial,Helvetica,sans-serif;background:#fff;color:#111}
 .container{max-width:900px;margin:0 auto;padding:12px}
@@ -224,6 +240,8 @@ static volatile bool skip_next_load_preferences = false;
 // with the display DMA flush and corrupts heap after repeated page-builds.
 volatile bool g_pending_visual_apply = false;
 volatile bool g_screens_need_apply[5] = {false, false, false, false, false};
+// millis() timestamp of the last config page visit; reset to 0 after WS auto-resume.
+unsigned long g_config_page_last_seen = 0;
 
 // Asset file lists — populated once at startup by scan_sd_assets().
 // Reusing these in handle_gauges_page() avoids a live SD scan during HTTP
@@ -231,6 +249,11 @@ volatile bool g_screens_need_apply[5] = {false, false, false, false, false};
 // SK WebSocket connection.
 static std::vector<String> g_iconFiles;
 static std::vector<String> g_bgFiles;
+
+// Single shared HTML buffer for handle_gauges_page() and handle_gauges_screen().
+// Using one 4096-byte buffer instead of two saves 4 KB of internal RAM.
+String g_http_html_buf;
+bool   g_http_html_buf_reserved = false;
 
 static void scan_sd_assets() {
     g_iconFiles.clear();
@@ -440,29 +463,38 @@ void save_preferences(bool skip_screen_blobs = false) {
     if (!any_nvs_ok) {
         Serial.println("[SD SAVE] NVS blob writes failed; saving screen configs to SD as fallback...");
         if (!SD_MMC.exists("/config")) SD_MMC.mkdir("/config");
-        for (int s = 0; s < NUM_SCREENS; ++s) {
-            char sdpath[64];
-            snprintf(sdpath, sizeof(sdpath), "/config/screen%d.bin", s);
-            File f = SD_MMC.open(sdpath, FILE_WRITE);
-            if (!f) { Serial.printf("[SD SAVE] Failed to open '%s'\n", sdpath); continue; }
-            size_t written = f.write((const uint8_t *)&screen_configs[s], sizeof(ScreenConfig));
-            f.close();
-            Serial.printf("[SD SAVE] Wrote '%s' -> %u bytes\n", sdpath, (unsigned)written);
+        // Batch write: all screens in one file — 3 FAT ops instead of 15
+        {
+            size_t total = sizeof(ScreenConfig) * NUM_SCREENS;
+            File f = SD_MMC.open("/config/screens.bin.tmp", FILE_WRITE);
+            if (!f) {
+                Serial.println("[SD SAVE] Failed to open /config/screens.bin.tmp");
+            } else {
+                size_t written = f.write((const uint8_t *)screen_configs, total);
+                f.close();
+                if (written == total) {
+                    SD_MMC.remove("/config/screens.bin");
+                    SD_MMC.rename("/config/screens.bin.tmp", "/config/screens.bin");
+                    Serial.printf("[SD SAVE] Wrote /config/screens.bin -> %u bytes\n", (unsigned)written);
+                } else {
+                    SD_MMC.remove("/config/screens.bin.tmp");
+                    Serial.printf("[SD SAVE] Short write /config/screens.bin -> %u/%u B, original preserved\n",
+                                  (unsigned)written, (unsigned)total);
+                }
+            }
+        } // end batch write
+        if (!SD_MMC.exists("/config")) SD_MMC.mkdir("/config");
+        File spf = SD_MMC.open("/config/signalk_paths.txt", FILE_WRITE);
+        if (spf) {
+            for (int i = 0; i < NUM_SCREENS * 2; ++i) {
+                spf.println(signalk_paths[i]);
+            }
+            spf.close();
+        } else {
+            Serial.println("[SD SAVE] Failed to open /config/signalk_paths.txt for writing");
         }
-    }
-
-    // Always write SignalK paths to SD as a fallback in case Preferences/NVS fails
-    if (!SD_MMC.exists("/config")) SD_MMC.mkdir("/config");
-    File spf = SD_MMC.open("/config/signalk_paths.txt", FILE_WRITE);
-    if (spf) {
-        for (int i = 0; i < NUM_SCREENS * 2; ++i) {
-            spf.println(signalk_paths[i]);
-        }
-        spf.close();
-    } else {
-        Serial.println("[SD SAVE] Failed to open /config/signalk_paths.txt for writing");
-    }
-}
+    } // end if (!any_nvs_ok)
+} // end save_preferences
 
 // Load preferences and screen configs from NVS or SD fallback
 void load_preferences() {
@@ -598,36 +630,72 @@ void load_preferences() {
     // Always prefer SD over NVS — SD is the authoritative save target.
     // NVS is only a fallback when SD is unavailable.
     bool restored_from_sd = false;
-    for (int s = 0; s < NUM_SCREENS; ++s) {
-        char sdpath[64];
-        snprintf(sdpath, sizeof(sdpath), "/config/screen%d.bin", s);
-        if (SD_MMC.exists(sdpath)) {
-            File f = SD_MMC.open(sdpath, FILE_READ);
-            if (f) {
-                size_t got = f.read((uint8_t *)&screen_configs[s], sizeof(ScreenConfig));
-                Serial.printf("[SD LOAD] Read '%s' -> %u bytes (expected %u)\n", sdpath, (unsigned)got, (unsigned)sizeof(ScreenConfig));
-                f.close();
-                bool valid = true;
-                for (int g = 0; g < 2 && valid; ++g) {
-                    for (int p = 0; p < 5; ++p) {
-                        if (screen_configs[s].cal[g][p].angle < -360 || screen_configs[s].cal[g][p].angle > 360) {
-                            valid = false; break;
+
+    // Try batch file first (written by current firmware)
+    if (SD_MMC.exists("/config/screens.bin")) {
+        File f = SD_MMC.open("/config/screens.bin", FILE_READ);
+        if (f) {
+            size_t total = sizeof(ScreenConfig) * NUM_SCREENS;
+            size_t got = f.read((uint8_t *)screen_configs, total);
+            f.close();
+            Serial.printf("[SD LOAD] Read /config/screens.bin -> %u bytes (expected %u)\n", (unsigned)got, (unsigned)total);
+            if (got == total) {
+                for (int s = 0; s < NUM_SCREENS; ++s) {
+                    bool valid = true;
+                    for (int g = 0; g < 2 && valid; ++g) {
+                        for (int p = 0; p < 5; ++p) {
+                            if (screen_configs[s].cal[g][p].angle < -360 || screen_configs[s].cal[g][p].angle > 360) {
+                                valid = false; break;
+                            }
                         }
                     }
+                    if (!valid) {
+                        Serial.printf("[CONFIG ERROR] SD batch config for screen %d invalid, restoring defaults\n", s);
+                        memset(&screen_configs[s], 0, sizeof(ScreenConfig));
+                    } else {
+                        restored_from_sd = true;
+                    }
                 }
-                if (!valid) {
-                    Serial.printf("[CONFIG ERROR] SD config for screen %d invalid, restoring defaults\n", s);
-                    memset(&screen_configs[s], 0, sizeof(ScreenConfig));
-                } else {
-                    restored_from_sd = true;
-                }
-            } else {
-                Serial.printf("[SD LOAD] Failed to open '%s', keeping NVS data for screen %d\n", sdpath, s);
             }
         } else {
-            Serial.printf("[SD LOAD] No SD config for screen %d, keeping NVS data\n", s);
+            Serial.println("[SD LOAD] Failed to open /config/screens.bin");
         }
     }
+
+    // Backward compat: fall back to per-screen files if batch file absent
+    if (!restored_from_sd) {
+        for (int s = 0; s < NUM_SCREENS; ++s) {
+            char sdpath[64];
+            snprintf(sdpath, sizeof(sdpath), "/config/screen%d.bin", s);
+            if (SD_MMC.exists(sdpath)) {
+                File f = SD_MMC.open(sdpath, FILE_READ);
+                if (f) {
+                    size_t got = f.read((uint8_t *)&screen_configs[s], sizeof(ScreenConfig));
+                    Serial.printf("[SD LOAD] Read '%s' -> %u bytes (expected %u)\n", sdpath, (unsigned)got, (unsigned)sizeof(ScreenConfig));
+                    f.close();
+                    bool valid = true;
+                    for (int g = 0; g < 2 && valid; ++g) {
+                        for (int p = 0; p < 5; ++p) {
+                            if (screen_configs[s].cal[g][p].angle < -360 || screen_configs[s].cal[g][p].angle > 360) {
+                                valid = false; break;
+                            }
+                        }
+                    }
+                    if (!valid) {
+                        Serial.printf("[CONFIG ERROR] SD config for screen %d invalid, restoring defaults\n", s);
+                        memset(&screen_configs[s], 0, sizeof(ScreenConfig));
+                    } else {
+                        restored_from_sd = true;
+                    }
+                } else {
+                    Serial.printf("[SD LOAD] Failed to open '%s', keeping NVS data for screen %d\n", sdpath, s);
+                }
+            } else {
+                Serial.printf("[SD LOAD] No SD config for screen %d, keeping NVS data\n", s);
+            }
+        }
+    }
+
     if (restored_from_sd) {
         Serial.println("[CONFIG RESTORE] Screen configs restored from SD after NVS was blank/default.");
     }
@@ -657,789 +725,154 @@ void load_preferences() {
     // No automatic default icon set; keep blank unless user selects one via UI
 }
 
+// Forward declaration — generates a single screen's config HTML fragment
+static void stream_screen_config(int s);
+
 void handle_gauges_page() {
-    // Use the asset file list cached at startup — avoids SD scan during
-    // HTTP handling which causes SD/WiFi DMA contention on ESP32-S3.
-    const std::vector<String>& iconFiles = g_iconFiles;
-    const std::vector<String>& bgFiles   = g_bgFiles;
-    // Use in-memory screen_configs directly — they are loaded at boot and
-    // updated after every save, so calling load_preferences() here is redundant
-    // and causes SD/WiFi DMA contention that drops the SK WebSocket.
-    skip_next_load_preferences = false; // consume flag if set
-    Serial.println("[GAUGES] handler entered");
-    // Build the entire page into a single String pre-allocated in PSRAM.
-    // BOARD_HAS_PSRAM + ESP-IDF default threshold (16KB): any malloc > 16KB goes
-    // to PSRAM automatically. The static keyword means the 200KB buffer is allocated
-    // once at first call and reused forever — zero reallocs, zero heap fragmentation
-    // regardless of how many times the page is loaded or saved.
-    static String html;
-    static bool html_reserved = false;
-    if (!html_reserved) {
-        html.reserve(200000); // one-time PSRAM allocation ~200KB
-        html_reserved = true;
+    // Lightweight shell page — per-screen config is loaded on demand via AJAX
+    // from /gauges/screen?s=N.  This keeps peak HTML generation under ~4 KB,
+    // preventing the OOM / TCP-buffer crashes that occurred when building all
+    // 5 screens' config in a single chunked response.
+    skip_next_load_preferences = false;
+    g_config_page_last_seen = millis();
+
+    // Pause WS immediately — if the WS is connected and streaming data its
+    // TCP receive buffers consume ~10 KB of iRAM.  Without pausing here the
+    // shell response alone can drop iRAM below the threshold needed for the
+    // subsequent AJAX fragment fetches, causing a crash.
+    pause_signalk_ws();
+
+    Serial.printf("[GAUGES] shell handler, iRAM=%u\n",
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+
+    extern bool test_mode;
+
+    esp_task_wdt_reset();
+    config_server.sendHeader("Connection", "close");
+    config_server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    config_server.send(200, "text/html; charset=utf-8", "");
+
+    // Re-use the SAME static String as handle_gauges_screen() to avoid
+    // holding two 4096-byte buffers permanently in iRAM.
+    extern String g_http_html_buf;
+    extern bool   g_http_html_buf_reserved;
+    String& html = g_http_html_buf;
+    if (!g_http_html_buf_reserved) {
+        html.reserve(4096);
+        g_http_html_buf_reserved = true;
     }
     html.clear();
-    // flushHtml is now a no-op: the whole page is built into a static PSRAM-backed
-    // String and sent in one shot at the end. No chunking, no fragmentation.
-    auto flushHtml = [&]() { /* no-op: whole page built first, sent in chunks below */ };
-    Serial.println("[GAUGES] headers sent, building HTML");
-    html += "<!DOCTYPE html><html><head>";
-    html += "<meta charset='UTF-8'>";
+    auto flushHtml = [&]() {
+        if (html.length() > 0) {
+            esp_task_wdt_reset();
+            config_server.sendContent(html);
+            html.clear();
+            // No lv_timer_handler() — shell page is ~4 KB, LVGL can wait.
+        }
+    };
+
+    // ── HTML head + CSS ──────────────────────────────────────────────
+    html += "<!DOCTYPE html><html><head><meta charset='UTF-8'>";
     html += STYLE;
     html += "<title>Gauge Calibration</title></head><body><div class='container'>";
-    flushHtml(); // flush header + styles before body content
-    Serial.println("[GAUGES] style flushed, building body");
-    extern bool test_mode;
     html += "<h2>Gauge Calibration</h2>";
-    html += "<form method='POST' action='/toggle-test-mode' style='margin-bottom:16px;text-align:center;'>";
-    // hidden active tab for toggle button to preserve current tab
-    html += "<input type='hidden' name='active_tab' id='active_tab_toggle' value='0'>";
-    html += "<input type='hidden' name='toggle' value='1'>";
-    html += "<button type='submit' style='padding:8px 16px;font-size:1em;'>";
+
+    // Test mode toggle — AJAX, no full page reload
+    html += "<div style='margin-bottom:16px;text-align:center;'>";
+    html += "<button type='button' id='testModeBtn' onclick='toggleTestMode()' style='padding:8px 16px;font-size:1em;'>";
     html += (test_mode ? "Disable Setup Mode" : "Enable Setup Mode");
     html += "</button> ";
-    html += "<span style='font-weight:bold;color:";
+    html += "<span id='testModeLabel' style='font-weight:bold;color:";
     html += (test_mode ? "#388e3c;'>SETUP MODE ON" : "#b71c1c;'>SETUP MODE OFF");
-    html += "</span></form>";
-        // --- Scan SD card for available image files (PNG, BIN, JPG, BMP, GIF) ---
-        // ...existing code...
-        // --- End SD scan ---
-    // Calibration form start
+    html += "</span></div>";
+    // Form wrapper — screen content is injected inside via AJAX
     html += "<form id='calibrationForm' method='POST' action='/save-gauges' accept-charset='utf-8'>";
-    // Hidden field to remember which tab the user had active when submitting
-    html += "<input type='hidden' name='active_tab' id='active_tab' value='0'>";
+    html += "<input type='hidden' name='save_screen' id='save_screen' value='0'>";
+
     // Tab bar
     html += "<div style='margin-bottom:16px; text-align:center;'>";
-        for (int s = 0; s < NUM_SCREENS; ++s) {
-            // When clicked: switch the web tab AND request the device to show that screen
-            int screen_one_based = s + 1;
-            html += "<button type='button' class='tab-btn' id='tabbtn_" + String(s) + "' onclick='(function(){ showScreenTab(" + String(s) + "); fetch(\"/set-screen?screen=" + String(screen_one_based) + "\", {method:\"GET\"}).catch(function(){ }); })()' style='margin:0 4px; padding:8px 16px; font-size:1em;'>Screen " + String(screen_one_based) + "</button>";
-        }
+    for (int s = 0; s < NUM_SCREENS; ++s) {
+        html += "<button type='button' class='tab-btn' id='tabbtn_" + String(s) +
+                "' onclick='showScreenTab(" + String(s) +
+                ")' style='margin:0 4px;padding:8px 16px;font-size:1em;'>Screen " +
+                String(s + 1) + "</button>";
+    }
     html += "</div>";
-    flushHtml(); // flush tab bar before heavy per-screen content
-    Serial.println("[GAUGES] tab bar flushed, starting per-screen loop");
-    // Tab content
-    for (int s = 0; s < NUM_SCREENS; ++s) {
-        Serial.printf("[GAUGES] building screen %d\n", s);
-        html += "<div class='tab-content' id='tabcontent_" + String(s) + "' style='display:" + (s==0?"block":"none") + ";'>";
-        html += "<h3>Screen " + String(s+1) + "</h3>";
-        
-        // Display Type dropdown (new)
-        html += "<div style='margin-bottom:16px;'><label>Display Type: <select name='displaytype_" + String(s) + "' id='displaytype_" + String(s) + "' onchange='toggleGaugeConfig(" + String(s) + ")'>";
-        html += "<option value='0'";
-        if (screen_configs[s].display_type == 0) html += " selected";
-        html += ">Gauge</option>";
-        html += "<option value='1'";
-        if (screen_configs[s].display_type == 1) html += " selected";
-        html += ">Number</option>";
-        html += "<option value='2'";
-        if (screen_configs[s].display_type == 2) html += " selected";
-        html += ">Dual</option>";
-        html += "<option value='3'";
-        if (screen_configs[s].display_type == 3) html += " selected";
-        html += ">Quad</option>";
-        html += "<option value='4'";
-        if (screen_configs[s].display_type == 4) html += " selected";
-        html += ">Gauge + Number</option>";
-        html += "<option value='5'";
-        if (screen_configs[s].display_type == 5) html += " selected";
-        html += ">Graph</option>";
-        html += "<option value='6'";
-        if (screen_configs[s].display_type == 6) html += " selected";
-        html += ">Compass</option>";
-        html += "<option value='7'";
-        if (screen_configs[s].display_type == 7) html += " selected";
-        html += ">Position</option>";
-        html += "</select></label></div>";
-        
-        // Background selection (per-screen)
-        String savedBg = String(screen_configs[s].background_path);
-        String savedBgNorm = savedBg;
-        savedBgNorm.toLowerCase();
-        savedBgNorm.replace("S://", "S:/");
-        while (savedBgNorm.indexOf("//") != -1) savedBgNorm.replace("//", "/");
-        html += "<div style='margin-bottom:8px;'><label>Background: <select name='bg_" + String(s) + "' id='bg_image_" + String(s) + "' onchange='toggleBgImageColor(" + String(s) + ")'>";
-        html += "<option value=''";
-        if (savedBg.length() == 0) html += " selected='selected'";
-        html += ">Default</option>";
-        for (const auto& b : bgFiles) {
-            String iconNorm = b;
-            iconNorm.toLowerCase();
-            iconNorm.replace("S://", "S:/");
-            while (iconNorm.indexOf("//") != -1) iconNorm.replace("//", "/");
-            html += "<option value='" + b + "'";
-            if (iconNorm == savedBgNorm && savedBg.length() > 0) html += " selected='selected'";
-            html += ">" + b + "</option>";
-        }
-        // Add Custom Color option for number displays (hidden for Gauge and Gauge+Number types)
-        html += "<option value='Custom Color'";
-        if (savedBg == "Custom Color") html += " selected='selected'";
-        if (screen_configs[s].display_type == DISPLAY_TYPE_GAUGE ||
-            screen_configs[s].display_type == DISPLAY_TYPE_GAUGE_NUMBER) html += " hidden disabled";
-        html += ">Custom Color</option>";
-        html += "</select></label></div>";
-        
-        // Number display configuration container (shown when display_type is Number)
-        html += "<div id='numberconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == 1 ? "block" : "none") + ";'>";
-        html += "<h4>Number Display Settings</h4>";
-        
-        // SignalK Path for number display
-        html += "<div style='margin-bottom:8px;'><label>SignalK Path: <input name='number_path_" + String(s) + "' type='text' value='" + String(screen_configs[s].number_path) + "' style='width:80%'></label></div>";
-        
-        // Background color (shown when Custom Color is selected in bg_image dropdown)
-        bool isCustomColor = (String(screen_configs[s].background_path) == "Custom Color");
-        html += "<div id='number_bg_color_div_" + String(s) + "' style='margin-bottom:8px;display:" + String(isCustomColor ? "block" : "none") + ";'>";
-        html += "<label>Background Color: <input name='number_bg_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].number_bg_color[0] ? screen_configs[s].number_bg_color : "#000000") + "'></label></div>";
-        
-        // Font size
-        html += "<div style='margin-bottom:8px;'><label>Font Size: <select name='number_font_size_" + String(s) + "'>";
-        html += "<option value='2'";
-        if (screen_configs[s].number_font_size <= 2) html += " selected";
-        html += ">Large (96pt)</option>";
-        html += "<option value='3'";
-        if (screen_configs[s].number_font_size == 3) html += " selected";
-        html += ">X-Large (120pt)</option>";
-        html += "<option value='4'";
-        if (screen_configs[s].number_font_size == 4) html += " selected";
-        html += ">XX-Large (144pt)</option>";
-        html += "</select></label></div>";
-        
-        // Font color
-        html += "<div style='margin-bottom:8px;'><label>Font Color: <input name='number_font_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].number_font_color[0] ? screen_configs[s].number_font_color : "#FFFFFF") + "'></label></div>";
-        
-        // Alarm thresholds (stored in gauge zone slots 0/1 which are unused by number display)
-        html += "<div class='icon-section'>";
-        html += "<h5 style='margin:0 0 8px;'>Alarms</h5>";
-        html += "<div style='display:flex;gap:16px;flex-wrap:wrap;'>";
-        html += "<div><label>Low Alarm &lt; <input name='num_low_thresh_" + String(s) + "' type='number' step='any' value='" + String(screen_configs[s].min[0][1]) + "' style='width:90px'></label> ";
-        html += "<label><input type='checkbox' name='num_low_buz_" + String(s) + "'";
-        if (screen_configs[s].buzzer[0][1]) html += " checked";
-        html += "> Enable</label></div>";
-        html += "<div><label>High Alarm &gt; <input name='num_high_thresh_" + String(s) + "' type='number' step='any' value='" + String(screen_configs[s].max[0][2]) + "' style='width:90px'></label> ";
-        html += "<label><input type='checkbox' name='num_high_buz_" + String(s) + "'";
-        if (screen_configs[s].buzzer[0][2]) html += " checked";
-        html += "> Enable</label></div>";
-        html += "</div>";
-        html += "</div>"; // End alarm box
-        
-        html += "</div>"; // End number display config
-        flushHtml();
-        Serial.printf("[GAUGES] screen %d number config flushed\n", s);
 
-        // Compass display configuration container
-        bool isMag = (String(screen_configs[s].number_path) == "navigation.headingMagnetic" ||
-                      String(screen_configs[s].number_path).length() == 0);
-        html += "<div id='compassconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == DISPLAY_TYPE_COMPASS ? "block" : "none") + ";'>";
-        html += "<h4>Compass Settings</h4>";
-        html += "<div style='margin-bottom:8px;'><label>Background Color: <input name='compass_bg_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].number_bg_color[0] ? screen_configs[s].number_bg_color : "#000000") + "'></label></div>";
-        html += "<div style='margin-bottom:8px;'>";
-        html += "<label style='margin-right:16px;'><input type='radio' name='compass_hdg_src_" + String(s) + "' value='navigation.headingMagnetic'";
-        if (isMag) html += " checked";
-        html += "> Magnetic (HDG &deg;M)</label>";
-        html += "<label><input type='radio' name='compass_hdg_src_" + String(s) + "' value='navigation.headingTrue'";
-        if (!isMag) html += " checked";
-        html += "> True (HDG &deg;T)</label>";
-        html += "</div>";
-        // Bottom-left / bottom-right extra data fields (reuse quad_bl/br fields)
-        html += "<h4>Extra Data Fields</h4>";
-        html += "<div style='display:flex;gap:16px;flex-wrap:wrap;'>";
-        // BL
-        html += "<div style='flex:1;min-width:200px;'>";
-        html += "<h5>Bottom-Left</h5>";
-        html += "<div style='margin-bottom:4px;'><label>SignalK Path: <input name='quad_bl_path_" + String(s) + "' type='text' value='" + String(screen_configs[s].quad_bl_path) + "' style='width:90%'></label></div>";
-        html += "<div style='margin-bottom:4px;'><label>Font Size: <select name='quad_bl_font_size_" + String(s) + "'>";
-        html += "<option value='0'" + String(screen_configs[s].quad_bl_font_size == 0 ? " selected" : "") + ">Small (48pt)</option>";
-        html += "<option value='1'" + String(screen_configs[s].quad_bl_font_size == 1 ? " selected" : "") + ">Medium (72pt)</option>";
-        html += "<option value='2'" + String(screen_configs[s].quad_bl_font_size == 2 ? " selected" : "") + ">Large (96pt)</option>";
-        html += "</select></label></div>";
-        html += "<div style='margin-bottom:4px;'><label>Font Color: <input name='quad_bl_font_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].quad_bl_font_color[0] ? screen_configs[s].quad_bl_font_color : "#FFFFFF") + "'></label></div>";
-        html += "</div>";
-        // BR
-        html += "<div style='flex:1;min-width:200px;'>";
-        html += "<h5>Bottom-Right</h5>";
-        html += "<div style='margin-bottom:4px;'><label>SignalK Path: <input name='quad_br_path_" + String(s) + "' type='text' value='" + String(screen_configs[s].quad_br_path) + "' style='width:90%'></label></div>";
-        html += "<div style='margin-bottom:4px;'><label>Font Size: <select name='quad_br_font_size_" + String(s) + "'>";
-        html += "<option value='0'" + String(screen_configs[s].quad_br_font_size == 0 ? " selected" : "") + ">Small (48pt)</option>";
-        html += "<option value='1'" + String(screen_configs[s].quad_br_font_size == 1 ? " selected" : "") + ">Medium (72pt)</option>";
-        html += "<option value='2'" + String(screen_configs[s].quad_br_font_size == 2 ? " selected" : "") + ">Large (96pt)</option>";
-        html += "</select></label></div>";
-        html += "<div style='margin-bottom:4px;'><label>Font Color: <input name='quad_br_font_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].quad_br_font_color[0] ? screen_configs[s].quad_br_font_color : "#FFFFFF") + "'></label></div>";
-        html += "</div>";
-        html += "</div>"; // end row
-        html += "</div>"; // End compass config
-        flushHtml();
+    // Placeholder — filled by showScreenTab() AJAX
+    html += "<div id='screen-content' style='min-height:200px;'>";
+    html += "<p style='text-align:center;color:#888;padding:40px 0;'>Loading screen configuration...</p>";
+    html += "</div>";
 
-        // Dual display configuration container (shown when display_type is Dual)
-        html += "<div id='dualconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == 2 ? "block" : "none") + ";'>";
-        html += "<h4>Dual Display Settings</h4>";
-        
-        // Background color (shown when Custom Color is selected in bg_image dropdown)
-        html += "<div id='dual_bg_color_div_" + String(s) + "' style='margin-bottom:8px;display:" + String(isCustomColor ? "block" : "none") + ";'>";
-        html += "<label>Background Color: <input name='dual_bg_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].number_bg_color[0] ? screen_configs[s].number_bg_color : "#000000") + "'></label></div>";
-        
-        // Top display settings
-        html += "<h5>Top Display</h5>";
-        html += "<div style='margin-bottom:8px;'><label>SignalK Path: <input name='dual_top_path_" + String(s) + "' type='text' value='" + String(screen_configs[s].dual_top_path) + "' style='width:80%'></label></div>";
-        html += "<div style='margin-bottom:8px;'><label>Font Size: <select name='dual_top_font_size_" + String(s) + "'>";
-        html += "<option value='0'";
-        if (screen_configs[s].dual_top_font_size == 0) html += " selected";
-        html += ">Small (48pt)</option>";
-        html += "<option value='1'";
-        if (screen_configs[s].dual_top_font_size == 1) html += " selected";
-        html += ">Medium (72pt)</option>";
-        html += "<option value='2'";
-        if (screen_configs[s].dual_top_font_size == 2) html += " selected";
-        html += ">Large (96pt)</option>";
-        html += "<option value='3'";
-        if (screen_configs[s].dual_top_font_size == 3) html += " selected";
-        html += ">X-Large (120pt)</option>";
-        html += "<option value='4'";
-        if (screen_configs[s].dual_top_font_size == 4) html += " selected";
-        html += ">XX-Large (144pt)</option>";
-        html += "</select></label></div>";
-        html += "<div style='margin-bottom:8px;'><label>Font Color: <input name='dual_top_font_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].dual_top_font_color[0] ? screen_configs[s].dual_top_font_color : "#FFFFFF") + "'></label></div>";
-
-        // Top display alarm (g=0, z=1 low, z=2 high)
-        html += "<div class='icon-section'>";
-        html += "<h5 style='margin:0 0 6px;'>Alarms</h5>";
-        html += "<div style='display:flex;gap:16px;flex-wrap:wrap;'>";
-        html += "<label>Low &lt; <input name='dual_top_low_thresh_" + String(s) + "' type='number' step='any' value='" + String(screen_configs[s].min[0][1]) + "' style='width:90px'></label> ";
-        html += "<label><input type='checkbox' name='dual_top_low_buz_" + String(s) + "'";
-        if (screen_configs[s].buzzer[0][1]) html += " checked";
-        html += "> Enable</label> ";
-        html += "<label>High &gt; <input name='dual_top_high_thresh_" + String(s) + "' type='number' step='any' value='" + String(screen_configs[s].max[0][2]) + "' style='width:90px'></label> ";
-        html += "<label><input type='checkbox' name='dual_top_high_buz_" + String(s) + "'";
-        if (screen_configs[s].buzzer[0][2]) html += " checked";
-        html += "> Enable</label></div>";
-        html += "</div>"; // End top alarm box
-
-        // Bottom display settings
-        html += "<h5>Bottom Display</h5>";
-        html += "<div style='margin-bottom:8px;'><label>SignalK Path: <input name='dual_bottom_path_" + String(s) + "' type='text' value='" + String(screen_configs[s].dual_bottom_path) + "' style='width:80%'></label></div>";
-        html += "<div style='margin-bottom:8px;'><label>Font Size: <select name='dual_bottom_font_size_" + String(s) + "'>";
-        html += "<option value='0'";
-        if (screen_configs[s].dual_bottom_font_size == 0) html += " selected";
-        html += ">Small (48pt)</option>";
-        html += "<option value='1'";
-        if (screen_configs[s].dual_bottom_font_size == 1) html += " selected";
-        html += ">Medium (72pt)</option>";
-        html += "<option value='2'";
-        if (screen_configs[s].dual_bottom_font_size == 2) html += " selected";
-        html += ">Large (96pt)</option>";
-        html += "<option value='3'";
-        if (screen_configs[s].dual_bottom_font_size == 3) html += " selected";
-        html += ">X-Large (120pt)</option>";
-        html += "<option value='4'";
-        if (screen_configs[s].dual_bottom_font_size == 4) html += " selected";
-        html += ">XX-Large (144pt)</option>";
-        html += "</select></label></div>";
-        html += "<div style='margin-bottom:8px;'><label>Font Color: <input name='dual_bottom_font_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].dual_bottom_font_color[0] ? screen_configs[s].dual_bottom_font_color : "#FFFFFF") + "'></label></div>";
-
-        // Bottom display alarm (g=1, z=1 low, z=2 high)
-        html += "<div class='icon-section'>";
-        html += "<h5 style='margin:0 0 6px;'>Alarms</h5>";
-        html += "<div style='display:flex;gap:16px;flex-wrap:wrap;'>";
-        html += "<label>Low &lt; <input name='dual_bot_low_thresh_" + String(s) + "' type='number' step='any' value='" + String(screen_configs[s].min[1][1]) + "' style='width:90px'></label> ";
-        html += "<label><input type='checkbox' name='dual_bot_low_buz_" + String(s) + "'";
-        if (screen_configs[s].buzzer[1][1]) html += " checked";
-        html += "> Enable</label> ";
-        html += "<label>High &gt; <input name='dual_bot_high_thresh_" + String(s) + "' type='number' step='any' value='" + String(screen_configs[s].max[1][2]) + "' style='width:90px'></label> ";
-        html += "<label><input type='checkbox' name='dual_bot_high_buz_" + String(s) + "'";
-        if (screen_configs[s].buzzer[1][2]) html += " checked";
-        html += "> Enable</label></div>";
-        html += "</div>"; // End bottom alarm box
-
-        html += "</div>"; // End dual display config
-        flushHtml();
-        
-        // Quad display configuration (hidden when display_type is not Quad)
-        html += "<div id='quadconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == 3 ? "block" : "none") + ";'>";
-        html += "<h4>Quad Display Settings</h4>";
-        
-        // Background color
-        html += "<div style='margin-bottom:8px;'><label>Background Color: <input name='quad_bg_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].number_bg_color[0] ? screen_configs[s].number_bg_color : "#000000") + "'></label></div>";
-        
-        // Helper function for quad quadrant HTML (we'll define it inline)
-        // Quad alarm slot mapping: TL=g0z1/2, TR=g0z3/4, BL=g1z1/2, BR=g1z3/4
-        auto addQuadrantHTML = [&](const char* name, const char* label, char* path, uint8_t size, char* color, int g_alm, int zl, int zh) {
-            html += "<h5>" + String(label) + "</h5>";
-            html += "<div style='margin-bottom:4px;'><label>SignalK Path: <input name='quad_" + String(name) + "_path_" + String(s) + "' type='text' value='" + String(path) + "' style='width:80%'></label></div>";
-            html += "<div style='margin-bottom:4px;'><label>Font Size: <select name='quad_" + String(name) + "_font_size_" + String(s) + "'>";
-            for (int fs = 0; fs < 3; fs++) {  // Only show Small, Medium, Large (0-2)
-                html += "<option value='" + String(fs) + "'";
-                if (size == fs) html += " selected";
-                html += ">";
-                if (fs == 0) html += "Small (48pt)";
-                else if (fs == 1) html += "Medium (72pt)";
-                else if (fs == 2) html += "Large (96pt)";
-                html += "</option>";
-            }
-            html += "</select></label></div>";
-            html += "<div style='margin-bottom:4px;'><label>Font Color: <input name='quad_" + String(name) + "_font_color_" + String(s) + "' type='color' value='" + String(color[0] ? color : "#FFFFFF") + "'></label></div>";
-            // Per-quadrant alarm fields
-            html += "<div class='icon-section'>";
-            html += "<h5 style='margin:0 0 6px;'>Alarms</h5>";
-            html += "<div style='display:flex;gap:8px;flex-wrap:wrap;'>";
-            html += "<label>Low &lt; <input name='quad_" + String(name) + "_low_thresh_" + String(s) + "' type='number' step='any' value='" + String(screen_configs[s].min[g_alm][zl]) + "' style='width:80px'></label> ";
-            html += "<label><input type='checkbox' name='quad_" + String(name) + "_low_buz_" + String(s) + "'";
-            if (screen_configs[s].buzzer[g_alm][zl]) html += " checked";
-            html += "> Enable</label> ";
-            html += "<label>High &gt; <input name='quad_" + String(name) + "_high_thresh_" + String(s) + "' type='number' step='any' value='" + String(screen_configs[s].max[g_alm][zh]) + "' style='width:80px'></label> ";
-            html += "<label><input type='checkbox' name='quad_" + String(name) + "_high_buz_" + String(s) + "'";
-            if (screen_configs[s].buzzer[g_alm][zh]) html += " checked";
-            html += "> Enable</label></div>";
-            html += "</div>"; // End alarm box
-        };
-
-        addQuadrantHTML("tl", "Top-Left",     screen_configs[s].quad_tl_path, screen_configs[s].quad_tl_font_size, screen_configs[s].quad_tl_font_color, 0, 1, 2);
-        flushHtml();
-        addQuadrantHTML("tr", "Top-Right",    screen_configs[s].quad_tr_path, screen_configs[s].quad_tr_font_size, screen_configs[s].quad_tr_font_color, 0, 3, 4);
-        flushHtml();
-        addQuadrantHTML("bl", "Bottom-Left",  screen_configs[s].quad_bl_path, screen_configs[s].quad_bl_font_size, screen_configs[s].quad_bl_font_color, 1, 1, 2);
-        flushHtml();
-        addQuadrantHTML("br", "Bottom-Right", screen_configs[s].quad_br_path, screen_configs[s].quad_br_font_size, screen_configs[s].quad_br_font_color, 1, 3, 4);
-        flushHtml();
-
-        html += "</div>"; // End quad display config
-        flushHtml();
-        
-        // Gauge configuration container (hidden when display_type is Number)
-        html += "<div id='gaugeconfig_" + String(s) + "' style='display:" + String((screen_configs[s].display_type == 0 || screen_configs[s].display_type == 4) ? "block" : "none") + ";'>";
-        
-        for (int g = 0; g < 2; ++g) {
-            // When rendering UI: allow user to hide bottom gauge per-screen
-            if (g == 0) {
-                html += "<div style='margin-bottom:8px;'><label>Show Bottom Gauge: <input type='checkbox' name='showbottom_" + String(s) + "'";
-                if (screen_configs[s].show_bottom) html += " checked";
-                html += "></label></div>";
-            }
-            int idx = s * 2 + g;
-            // If bottom gauge is disabled, skip rendering its configuration
-            if (g == 1 && !screen_configs[s].show_bottom) {
-                html += "<div style='margin-bottom:8px;'><em>Bottom gauge disabled for this screen.</em></div>";
-                continue;
-            }
-            html += "<b>" + String(g == 0 ? "Top Gauge" : "Bottom Gauge") + "</b>";
-            // SignalK Path: show immediately above the icon options (per-gauge)
-            html += "<div style='margin-bottom:8px;'><label>SignalK Path: <input name='skpath_" + String(s) + "_" + String(g) + "' type='text' value='" + signalk_paths[idx] + "' style='width:80%'></label></div>";
-
-            // Calibration points table (moved to be under SignalK Path)
-            html += "<table class='table'><tr><th>Point</th><th>Angle</th><th>Value</th><th>Test</th></tr>";
-            for (int p = 0; p < 5; ++p) {
-                html += "<tr><td>" + String(p+1) + "</td>";
-                html += "<td><input name='" + String("angle_") + s + "_" + g + "_" + p + "' type='number' value='" + String(gauge_cal[s][g][p].angle) + "'></td>";
-                html += "<td><input name='" + String("value_") + s + "_" + g + "_" + p + "' type='number' step='any' value='" + String(gauge_cal[s][g][p].value) + "'></td>";
-                html += "<td><button type='button' onclick='testGaugePoint(" + String(s) + "," + String(g) + "," + String(p) + ")' ";
-                html += (test_mode ? "" : "disabled ");
-                html += "style='padding:4px 8px;font-size:0.9em;background-color:";
-                html += (test_mode ? "#4a90e2" : "#cccccc");
-                html += ";color:#ffffff;border:1px solid #2d5a8f;border-radius:4px;cursor:";
-                html += (test_mode ? "pointer" : "not-allowed");
-                html += ";'>Test</button></td></tr>";
-            }
-            html += "</table>";
-
-            // Icon controls (grouped visually)
-            String savedIcon = String(screen_configs[s].icon_paths[g]);
-            String savedIconNorm = savedIcon;
-            savedIconNorm.toLowerCase();
-            savedIconNorm.replace("S://", "S:/");
-            while (savedIconNorm.indexOf("//") != -1) savedIconNorm.replace("//", "/");
-            html += "<div class='icon-section'><div class='icon-row'>";
-            html += "<div style='margin-bottom:8px;'><label>Icon: <select name='icon_" + String(s) + "_" + String(g) + "'>";
-            html += "<option value=''";
-            if (savedIcon.length() == 0) html += " selected='selected'";
-            html += ">None</option>";
-            for (const auto& icon : iconFiles) {
-                String iconNorm = icon;
-                iconNorm.toLowerCase();
-                iconNorm.replace("S://", "S:/");
-                while (iconNorm.indexOf("//") != -1) iconNorm.replace("//", "/");
-                html += "<option value='" + icon + "'";
-                if (iconNorm == savedIconNorm && savedIcon.length() > 0) html += " selected='selected'";
-                html += ">" + icon + "</option>";
-            }
-            html += "</select></label></div>";
-            // Icon position selector (per-gauge)
-            int curPos = screen_configs[s].icon_pos[g];
-            html += "<div style='margin-bottom:8px;'><label>Icon Position: <select name='iconpos_" + String(s) + "_" + String(g) + "'>";
-            struct { int v; const char *n; } posopts[] = { {0,"Top"}, {1,"Right"}, {2,"Bottom"}, {3,"Left"} };
-            for (int _po = 0; _po < 4; ++_po) {
-                html += "<option value='" + String(posopts[_po].v) + "'";
-                if (curPos == posopts[_po].v) html += " selected='selected'";
-                html += ">" + String(posopts[_po].n) + "</option>";
-            }
-            html += "</select></label></div>";
-            // close icon-row but keep icon-section open so min/max controls are grouped with icons
-            html += "</div>"; // close icon-row
-
-            // Zone min/max/color/transparent/buzzer controls — include inside icon-section
-            html += "<div class='zone-row'>";
-            for (int i = 1; i <= 4; ++i) {
-                float minVal = screen_configs[s].min[g][i];
-                float maxVal = screen_configs[s].max[g][i];
-                String colorVal = safeColor(screen_configs[s].color[g][i], "#000000");
-                bool transVal = screen_configs[s].transparent[g][i] != 0;
-                bool bzrVal = screen_configs[s].buzzer[g][i] != 0;
-                html += "<div class='zone-item'><label>Min " + String(i) + ": <input name='mnv" + String(s) + String(g) + String(i) + "' type='number' step='any' value='" + String(minVal) + "' style='width:100px'></label></div>";
-                html += "<div class='zone-item'><label>Max " + String(i) + ": <input name='mxv" + String(s) + String(g) + String(i) + "' type='number' step='any' value='" + String(maxVal) + "' style='width:100px'></label></div>";
-                html += "<div class='zone-item'><label>Color: <input class='color-input' name='clr" + String(s) + String(g) + String(i) + "' type='color' value='" + colorVal + "'></label></div>";
-                html += "<div class='zone-item small'><label>Transparent <input name='trn" + String(s) + String(g) + String(i) + "' type='checkbox'";
-                if (transVal) html += " checked";
-                html += "></label></div>";
-                html += "<div class='zone-item small'><label>Buzzer <input name='bzr" + String(s) + String(g) + String(i) + "' type='checkbox'";
-                if (bzrVal) html += " checked";
-                html += "></label></div>";
-            }
-            html += "</div>";
-
-            html += "</div>"; // close icon-section
-            flushHtml(); // flush after each gauge (~3KB each)
-        }
-        html += "</div>"; // close gaugeconfig div
-        flushHtml();
-        
-        // Gauge + Number configuration (display_type == 4)
-        html += "<div id='gaugenumconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == 4 ? "block" : "none") + ";'>";
-        html += "<h4>Center Number Display</h4>";
-        // Note: top gauge path, calibration, icon, and zone controls are shared with
-        // the gauge section above (gaugeconfig_N), which is also shown for type 4.
-        html += "<h5 style='margin-top:4px;'>Center Number Display</h5>";
-        html += "<div style='margin-bottom:8px;'><label>SignalK Path: <input name='gauge_num_center_path_" + String(s) + "' type='text' value='" + String(screen_configs[s].gauge_num_center_path) + "' style='width:80%'></label></div>";
-        html += "<div style='margin-bottom:8px;'><label>Font Size: <select name='gauge_num_center_font_size_" + String(s) + "'>";
-        html += "<option value='0'";
-        if (screen_configs[s].gauge_num_center_font_size == 0) html += " selected";
-        html += ">Small (48pt)</option>";
-        html += "<option value='1'";
-        if (screen_configs[s].gauge_num_center_font_size == 1) html += " selected";
-        html += ">Medium (72pt)</option>";
-        html += "<option value='2'";
-        if (screen_configs[s].gauge_num_center_font_size == 2) html += " selected";
-        html += ">Large (96pt)</option>";
-        html += "<option value='3'";
-        if (screen_configs[s].gauge_num_center_font_size == 3) html += " selected";
-        html += ">X-Large (120pt)</option>";
-        html += "<option value='4'";
-        if (screen_configs[s].gauge_num_center_font_size == 4) html += " selected";
-        html += ">XX-Large (144pt)</option>";
-        html += "</select></label></div>";
-        html += "<div style='margin-bottom:8px;'><label>Font Color: <input name='gauge_num_center_font_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].gauge_num_center_font_color[0] ? screen_configs[s].gauge_num_center_font_color : "#FFFFFF") + "'></label></div>";
-
-        // Center number alarms: min[1][1]/buzzer[1][1]=low, max[1][2]/buzzer[1][2]=high
-        html += "<div class='icon-section'>";
-        html += "<h5 style='margin:0 0 8px;'>Alarms</h5>";
-        html += "<div style='display:flex;gap:16px;flex-wrap:wrap;'>";
-        html += "<div><label>Low Alarm &lt; <input name='gnum_low_thresh_" + String(s) + "' type='number' step='any' value='" + String(screen_configs[s].min[1][1]) + "' style='width:90px'></label> ";
-        html += "<label><input type='checkbox' name='gnum_low_buz_" + String(s) + "'";
-        if (screen_configs[s].buzzer[1][1]) html += " checked";
-        html += "> Enable</label></div>";
-        html += "<div><label>High Alarm &gt; <input name='gnum_high_thresh_" + String(s) + "' type='number' step='any' value='" + String(screen_configs[s].max[1][2]) + "' style='width:90px'></label> ";
-        html += "<label><input type='checkbox' name='gnum_high_buz_" + String(s) + "'";
-        if (screen_configs[s].buzzer[1][2]) html += " checked";
-        html += "> Enable</label></div>";
-        html += "</div>";
-        html += "</div>"; // End alarm box
-
-        html += "</div>"; // close gaugenumconfig div
-        flushHtml();
-        
-        // Graph configuration (display_type == 5)
-        html += "<div id='graphconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == 5 ? "block" : "none") + ";'>";
-        html += "<h4>Graph Display Settings</h4>";
-        
-        // SignalK Path for graph display (unique name to avoid collision with number_path_ in NUMBER section)
-        html += "<div style='margin-bottom:8px;'><label>SignalK Path: <input name='graph_path_1_" + String(s) + "' type='text' value='" + String(screen_configs[s].number_path) + "' style='width:80%'></label></div>";
-        
-        // Chart Type selection
-        html += "<div style='margin-bottom:8px;'><label>Chart Type: <select name='graph_chart_type_" + String(s) + "'>";
-        html += "<option value='0'";
-        if (screen_configs[s].graph_chart_type == 0) html += " selected";
-        html += ">Line Chart</option>";
-        html += "<option value='1'";
-        if (screen_configs[s].graph_chart_type == 1) html += " selected";
-        html += ">Bar Chart</option>";
-        html += "<option value='2'";
-        if (screen_configs[s].graph_chart_type == 2) html += " selected";
-        html += ">Scatter Plot</option>";
-        html += "</select></label></div>";
-        
-        // Time Range selection
-        html += "<div style='margin-bottom:8px;'><label>Time Range: <select name='graph_time_range_" + String(s) + "'>";
-        html += "<option value='0'";
-        if (screen_configs[s].graph_time_range == 0) html += " selected";
-        html += ">10 seconds</option>";
-        html += "<option value='1'";
-        if (screen_configs[s].graph_time_range == 1) html += " selected";
-        html += ">30 seconds</option>";
-        html += "<option value='2'";
-        if (screen_configs[s].graph_time_range == 2) html += " selected";
-        html += ">1 minute</option>";
-        html += "<option value='3'";
-        if (screen_configs[s].graph_time_range == 3) html += " selected";
-        html += ">5 minutes</option>";
-        html += "<option value='4'";
-        if (screen_configs[s].graph_time_range == 4) html += " selected";
-        html += ">10 minutes</option>";
-        html += "<option value='5'";
-        if (screen_configs[s].graph_time_range == 5) html += " selected";
-        html += ">30 minutes</option>";
-        html += "</select></label></div>";
-        
-        // Font color for graph (labels, axes, line color)
-        html += "<div style='margin-bottom:8px;'><label>Series 1 Color: <input name='graph_color_1_" + String(s) + "' type='color' value='" + String(screen_configs[s].number_font_color[0] ? screen_configs[s].number_font_color : "#00FF00") + "'></label></div>";
-        
-        // Second series configuration
-        html += "<h5 style='margin-top:16px;'>Second Data Series (Optional)</h5>";
-        html += "<div style='margin-bottom:8px;'><label>SignalK Path 2: <input name='graph_path_2_" + String(s) + "' type='text' value='" + String(screen_configs[s].graph_path_2) + "' style='width:80%'></label></div>";
-        html += "<div style='margin-bottom:8px;'><label>Series 2 Color: <input name='graph_color_2_" + String(s) + "' type='color' value='" + String(screen_configs[s].graph_color_2[0] ? screen_configs[s].graph_color_2 : "#FF0000") + "'></label></div>";
-        
-        // Background color (shown when Custom Color is selected in bg_image dropdown)
-        bool isCustomColorGraph = (String(screen_configs[s].background_path) == "Custom Color");
-        html += "<div id='graph_bg_color_div_" + String(s) + "' style='margin-bottom:8px;display:" + String(isCustomColorGraph ? "block" : "none") + ";'>";
-        html += "<label>Background Color: <input name='graph_bg_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].number_bg_color[0] ? screen_configs[s].number_bg_color : "#000000") + "'></label></div>";
-        
-        html += "</div>"; // close graphconfig div
-
-        // ── Position Display Settings ─────────────────────────────────────────────
-        html += "<div id='positionconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == 7 ? "block" : "none") + ";'>";
-        html += "<h4>Position Display Settings</h4>";
-
-        // Coordinate format
-        html += "<div style='margin-bottom:8px;'><label>Coordinate Format: <select name='pos_coord_format_" + String(s) + "'>";
-        html += "<option value='0'";
-        if (screen_configs[s].number_font_size == 0) html += " selected";
-        html += ">Decimal Degrees (DD)</option>";
-        html += "<option value='1'";
-        if (screen_configs[s].number_font_size == 1) html += " selected";
-        html += ">Degrees Minutes Seconds (DMS)</option>";
-        html += "<option value='2'";
-        if (screen_configs[s].number_font_size == 2) html += " selected";
-        html += ">Degrees Decimal Minutes (DDM)</option>";
-        html += "</select></label></div>";
-
-        // Colour pickers
-        html += "<div style='margin-bottom:8px;'><label>Lat/Lon Colour: <input name='pos_latlon_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].pos_latlon_color[0] ? screen_configs[s].pos_latlon_color : "#ffffff") + "'></label></div>";
-        html += "<div style='margin-bottom:8px;'><label>Time Colour: <input name='pos_time_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].pos_time_color[0] ? screen_configs[s].pos_time_color : "#64dcb4") + "'></label></div>";
-        html += "<div style='margin-bottom:8px;'><label>Divider / Title Colour: <input name='pos_divider_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].pos_divider_color[0] ? screen_configs[s].pos_divider_color : "#324678") + "'></label></div>";
-
-        // Background colour (shown when Custom Color background is selected)
-        bool isCustomColorPos = (String(screen_configs[s].background_path) == "Custom Color");
-        html += "<div id='pos_bg_color_div_" + String(s) + "' style='margin-bottom:8px;display:" + String(isCustomColorPos ? "block" : "none") + ";'>";
-        html += "<label>Background Colour: <input name='pos_bg_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].number_bg_color[0] ? screen_configs[s].number_bg_color : "#000000") + "'></label></div>";
-
-        html += "</div>"; // close positionconfig div
-
-        html += "</div>"; // close tab content
-        flushHtml(); // flush after each screen tab to keep memory usage low
-    }
-    // Tab JS and Apply button (ensure inside form)
-    html += "<div style='text-align:center; margin-top:16px;'><input type='button' id='saveBtn' value='Apply (no reboot)' onclick='ajaxSave()' style='padding:10px 24px; font-size:1.1em;'></div>";
+    // Apply button
+    html += "<div style='text-align:center;margin-top:16px;'>";
+    html += "<input type='button' id='saveBtn' value='Apply (no reboot)' onclick='ajaxSave()' style='padding:10px 24px;font-size:1.1em;'>";
+    html += "</div>";
     html += "</form>";
-    // Now add the test buttons outside the main form
-    // Flush per-screen to stay within ~4KB chunks — 50 forms × ~350 chars ≈ 17KB total.
-    for (int s = 0; s < NUM_SCREENS; ++s) {
-        for (int g = 0; g < 2; ++g) {
-            for (int p = 0; p < 5; ++p) {
-                html += "<form style='display:none;' id='testform_" + String(s) + "_" + String(g) + "_" + String(p) + "' method='POST' action='/test-gauge'>";
-                html += "<input type='hidden' name='screen' value='" + String(s) + "'>";
-                html += "<input type='hidden' name='gauge' value='" + String(g) + "'>";
-                html += "<input type='hidden' name='point' value='" + String(p) + "'>";
-                html += "<input type='hidden' name='angle' id='testangle_" + String(s) + "_" + String(g) + "_" + String(p) + "' value=''>";
-                html += "</form>";
-            }
-        }
-        flushHtml(); // flush after each screen's test forms (~10 forms at a time)
-    }
-    flushHtml(); // flush before JavaScript block — JS alone can be 3-5KB
-    html += "<script>function testGaugePoint(screen,gauge,point){\n";
-    html += "  var angleInput = document.querySelector('input[name=\"angle_'+screen+'_'+gauge+'_'+point+'\"]');\n";
-    html += "  var testAngle = document.getElementById('testangle_'+screen+'_'+gauge+'_'+point);\n";
-    html += "  if(angleInput && testAngle){ testAngle.value = angleInput.value; }\n";
-    html += "  document.getElementById('testform_'+screen+'_'+gauge+'_'+point).submit();\n";
-    html += "}\n";
+    html += "<p style='text-align:center;'><a href='/'>Back</a></p>";
+    flushHtml();
+    // ── JavaScript — AJAX tab loader, save, toggle ─────────────────
+    html += "<script>\n";
+    html += "var NUM_SCREENS=" + String(NUM_SCREENS) + ";\n";
+    html += "var currentTab=-1;\n";
+
+    // showScreenTab: fetch a single screen's config HTML from the device
     html += "function showScreenTab(idx){\n";
-    html += "  for(var s=0;s<" + String(NUM_SCREENS) + ";++s){\n";
-    html += "    var el = document.getElementById('tabcontent_'+s); if(el) el.style.display=(s==idx?'block':'none');\n";
-    html += "    var btn=document.getElementById('tabbtn_'+s);\n";
-    html += "    if(btn)btn.style.background=(s==idx?'#e3eaf6':'#f4f6fa');\n";
+    html += "  if(idx===currentTab) return;\n";
+    html += "  currentTab=idx;\n";
+    html += "  document.getElementById('save_screen').value=idx;\n";
+    html += "  for(var s=0;s<NUM_SCREENS;s++){\n";
+    html += "    var b=document.getElementById('tabbtn_'+s);\n";
+    html += "    if(b) b.style.background=(s===idx?'#e3eaf6':'#f4f6fa');\n";
     html += "  }\n";
-    html += "  var hidden = document.getElementById('active_tab'); if(hidden) hidden.value = idx;\n";
-    html += "  var hidden2 = document.getElementById('active_tab_toggle'); if(hidden2) hidden2.value = idx;\n";
-    html += "  try{ history.replaceState && history.replaceState(null,null,'#tab'+idx); }catch(e){}\n";
+    html += "  var cont=document.getElementById('screen-content');\n";
+    html += "  cont.innerHTML='<p style=\"text-align:center;color:#888;padding:40px 0;\">Loading...</p>';\n";
+    html += "  fetch('/gauges/screen?s='+idx)\n";
+    html += "    .then(function(r){return r.text();})\n";
+    html += "    .then(function(h){\n";
+    html += "      cont.innerHTML=h;\n";
+    html += "      initScreenTab(idx);\n";
+    html += "    })\n";
+    html += "    .catch(function(e){\n";
+    html += "      cont.innerHTML='<p style=\"color:red;text-align:center;\">Failed to load – '+e+'</p>';\n";
+    html += "    });\n";
     html += "}\n";
+
+    // initScreenTab: called after injecting screen HTML — set up toggles
+    html += "function initScreenTab(s){\n";
+    html += "  toggleGaugeConfig(s);\n";
+    html += "}\n";
+
+    // toggleGaugeConfig — same logic as before but operates on injected DOM
     html += "function toggleGaugeConfig(screen){\n";
-    html += "  var sel = document.getElementById('displaytype_'+screen);\n";
-    html += "  var gaugeDiv = document.getElementById('gaugeconfig_'+screen);\n";
-    html += "  var numberDiv = document.getElementById('numberconfig_'+screen);\n";
-    html += "  var dualDiv = document.getElementById('dualconfig_'+screen);\n";
-    html += "  var quadDiv = document.getElementById('quadconfig_'+screen);\n";
-    html += "  var gaugeNumDiv = document.getElementById('gaugenumconfig_'+screen);\n";
-    html += "  var graphDiv = document.getElementById('graphconfig_'+screen);\n";
-    html += "  var positionDiv = document.getElementById('positionconfig_'+screen);\n";
-    html += "  var compassDiv = document.getElementById('compassconfig_'+screen);\n";
-    html += "  function disableInputs(div, disable) {\n";
-    html += "    // Intentionally does NOT set input.disabled — disabled inputs are\n";
-    html += "    // excluded from FormData/URLSearchParams (AJAX save) causing other\n";
-    html += "    // screens' configs to be silently dropped. Visibility via\n";
-    html += "    // div.style.display is sufficient; the server uses hasArg() checks.\n";
-    html += "    if(!div) return;\n";
-    html += "  }\n";
-    html += "  if(sel && gaugeDiv && numberDiv && dualDiv && quadDiv && gaugeNumDiv && graphDiv && positionDiv && compassDiv){\n";
-    html += "    if(sel.value === '0'){\n";
-    html += "      gaugeDiv.style.display = 'block'; disableInputs(gaugeDiv, false);\n";
-    html += "      numberDiv.style.display = 'none'; disableInputs(numberDiv, true);\n";
-    html += "      dualDiv.style.display = 'none'; disableInputs(dualDiv, true);\n";
-    html += "      quadDiv.style.display = 'none'; disableInputs(quadDiv, true);\n";
-    html += "      gaugeNumDiv.style.display = 'none'; disableInputs(gaugeNumDiv, true);\n";
-    html += "      graphDiv.style.display = 'none'; disableInputs(graphDiv, true);\n";
-    html += "      positionDiv.style.display = 'none'; compassDiv.style.display = 'none';\n";
-    html += "    } else if(sel.value === '1'){\n";
-    html += "      gaugeDiv.style.display = 'none'; disableInputs(gaugeDiv, true);\n";
-    html += "      numberDiv.style.display = 'block'; disableInputs(numberDiv, false);\n";
-    html += "      dualDiv.style.display = 'none'; disableInputs(dualDiv, true);\n";
-    html += "      quadDiv.style.display = 'none'; disableInputs(quadDiv, true);\n";
-    html += "      gaugeNumDiv.style.display = 'none'; disableInputs(gaugeNumDiv, true);\n";
-    html += "      graphDiv.style.display = 'none'; disableInputs(graphDiv, true);\n";
-    html += "      positionDiv.style.display = 'none'; compassDiv.style.display = 'none';\n";
-    html += "    } else if(sel.value === '2'){\n";
-    html += "      gaugeDiv.style.display = 'none'; disableInputs(gaugeDiv, true);\n";
-    html += "      numberDiv.style.display = 'none'; disableInputs(numberDiv, true);\n";
-    html += "      dualDiv.style.display = 'block'; disableInputs(dualDiv, false);\n";
-    html += "      quadDiv.style.display = 'none'; disableInputs(quadDiv, true);\n";
-    html += "      gaugeNumDiv.style.display = 'none'; disableInputs(gaugeNumDiv, true);\n";
-    html += "      graphDiv.style.display = 'none'; disableInputs(graphDiv, true);\n";
-    html += "      positionDiv.style.display = 'none'; compassDiv.style.display = 'none';\n";
-    html += "    } else if(sel.value === '3'){\n";
-    html += "      gaugeDiv.style.display = 'none'; disableInputs(gaugeDiv, true);\n";
-    html += "      numberDiv.style.display = 'none'; disableInputs(numberDiv, true);\n";
-    html += "      dualDiv.style.display = 'none'; disableInputs(dualDiv, true);\n";
-    html += "      quadDiv.style.display = 'block'; disableInputs(quadDiv, false);\n";
-    html += "      gaugeNumDiv.style.display = 'none'; disableInputs(gaugeNumDiv, true);\n";
-    html += "      graphDiv.style.display = 'none'; disableInputs(graphDiv, true);\n";
-    html += "      positionDiv.style.display = 'none'; compassDiv.style.display = 'none';\n";
-    html += "    } else if(sel.value === '4'){\n";
-    html += "      gaugeDiv.style.display = 'block'; disableInputs(gaugeDiv, false);\n";
-    html += "      numberDiv.style.display = 'none'; disableInputs(numberDiv, true);\n";
-    html += "      dualDiv.style.display = 'none'; disableInputs(dualDiv, true);\n";
-    html += "      quadDiv.style.display = 'none'; disableInputs(quadDiv, true);\n";
-    html += "      gaugeNumDiv.style.display = 'block'; disableInputs(gaugeNumDiv, false);\n";
-    html += "      graphDiv.style.display = 'none'; disableInputs(graphDiv, true);\n";
-    html += "      positionDiv.style.display = 'none'; compassDiv.style.display = 'none';\n";
-    html += "    } else if(sel.value === '5'){\n";
-    html += "      gaugeDiv.style.display = 'none'; disableInputs(gaugeDiv, true);\n";
-    html += "      numberDiv.style.display = 'none'; disableInputs(numberDiv, true);\n";
-    html += "      dualDiv.style.display = 'none'; disableInputs(dualDiv, true);\n";
-    html += "      quadDiv.style.display = 'none'; disableInputs(quadDiv, true);\n";
-    html += "      gaugeNumDiv.style.display = 'none'; disableInputs(gaugeNumDiv, true);\n";
-    html += "      graphDiv.style.display = 'block'; disableInputs(graphDiv, false);\n";
-    html += "      positionDiv.style.display = 'none'; compassDiv.style.display = 'none';\n";
-    html += "    } else if(sel.value === '6'){\n";
-    html += "      gaugeDiv.style.display = 'none'; disableInputs(gaugeDiv, true);\n";
-    html += "      numberDiv.style.display = 'none'; disableInputs(numberDiv, true);\n";
-    html += "      dualDiv.style.display = 'none'; disableInputs(dualDiv, true);\n";
-    html += "      quadDiv.style.display = 'none'; disableInputs(quadDiv, true);\n";
-    html += "      gaugeNumDiv.style.display = 'none'; disableInputs(gaugeNumDiv, true);\n";
-    html += "      graphDiv.style.display = 'none'; disableInputs(graphDiv, true);\n";
-    html += "      positionDiv.style.display = 'none'; compassDiv.style.display = 'block';\n";
-    html += "    } else if(sel.value === '7'){\n";
-    html += "      gaugeDiv.style.display = 'none'; disableInputs(gaugeDiv, true);\n";
-    html += "      numberDiv.style.display = 'none'; disableInputs(numberDiv, true);\n";
-    html += "      dualDiv.style.display = 'none'; disableInputs(dualDiv, true);\n";
-    html += "      quadDiv.style.display = 'none'; disableInputs(quadDiv, true);\n";
-    html += "      gaugeNumDiv.style.display = 'none'; disableInputs(gaugeNumDiv, true);\n";
-    html += "      graphDiv.style.display = 'none'; disableInputs(graphDiv, true);\n";
-    html += "      positionDiv.style.display = 'block'; compassDiv.style.display = 'none';\n";
-    html += "    }\n";
-    html += "  }\n";
-    html += "  // Hide Custom Color option for Gauge (0) and Gauge+Number (4) display types\n";
-    html += "  var bgSel = document.getElementById('bg_image_'+screen);\n";
-    html += "  if(bgSel && sel){\n";
-    html += "    var ccOpt = bgSel.querySelector(\"option[value='Custom Color']\");\n";
-    html += "    var isGaugeType = (sel.value === '0' || sel.value === '4');\n";
-    html += "    if(ccOpt){\n";
-    html += "      ccOpt.hidden = isGaugeType;\n";
-    html += "      ccOpt.disabled = isGaugeType;\n";
-    html += "      if(isGaugeType && bgSel.value === 'Custom Color'){\n";
-    html += "        bgSel.value = bgSel.options[0].value;\n";
-    html += "      }\n";
-    html += "    }\n";
+    html += "  var sel=document.getElementById('displaytype_'+screen);\n";
+    html += "  if(!sel) return;\n";
+    html += "  var divIds=['gaugeconfig','numberconfig','dualconfig','quadconfig','gaugenumconfig','graphconfig','compassconfig','positionconfig'];\n";
+    html += "  var typeMap={'0':['gaugeconfig'],'1':['numberconfig'],'2':['dualconfig'],'3':['quadconfig'],'4':['gaugeconfig','gaugenumconfig'],'5':['graphconfig'],'6':['compassconfig'],'7':['positionconfig']};\n";
+    html += "  var show=typeMap[sel.value]||[];\n";
+    html += "  divIds.forEach(function(d){\n";
+    html += "    var el=document.getElementById(d+'_'+screen);\n";
+    html += "    if(el) el.style.display=(show.indexOf(d)>=0?'block':'none');\n";
+    html += "  });\n";
+    // Hide Custom Color for gauge types
+    html += "  var bgSel=document.getElementById('bg_image_'+screen);\n";
+    html += "  if(bgSel&&sel){\n";
+    html += "    var ccOpt=bgSel.querySelector(\"option[value='Custom Color']\");\n";
+    html += "    var isGauge=(sel.value==='0'||sel.value==='4');\n";
+    html += "    if(ccOpt){ccOpt.hidden=isGauge;ccOpt.disabled=isGauge;if(isGauge&&bgSel.value==='Custom Color')bgSel.value=bgSel.options[0].value;}\n";
     html += "  }\n";
     html += "  toggleBgImageColor(screen);\n";
     html += "}\n";
+
     html += "function toggleBgImageColor(screen){\n";
-    html += "  var sel = document.getElementById('bg_image_'+screen);\n";
-    html += "  var colorDiv = document.getElementById('number_bg_color_div_'+screen);\n";
-    html += "  var dualColorDiv = document.getElementById('dual_bg_color_div_'+screen);\n";
-    html += "  var graphColorDiv = document.getElementById('graph_bg_color_div_'+screen);\n";
-    html += "  if(sel && colorDiv){\n";
-    html += "    colorDiv.style.display = (sel.value === 'Custom Color') ? 'block' : 'none';\n";
-    html += "  }\n";
-    html += "  if(sel && dualColorDiv){\n";
-    html += "    dualColorDiv.style.display = (sel.value === 'Custom Color') ? 'block' : 'none';\n";
-    html += "  }\n";
-    html += "  if(sel && graphColorDiv){\n";
-    html += "    graphColorDiv.style.display = (sel.value === 'Custom Color') ? 'block' : 'none';\n";
-    html += "  }\n";
+    html += "  var sel=document.getElementById('bg_image_'+screen);\n";
+    html += "  ['number_bg_color_div_','dual_bg_color_div_','graph_bg_color_div_','pos_bg_color_div_'].forEach(function(p){\n";
+    html += "    var d=document.getElementById(p+screen);\n";
+    html += "    if(sel&&d) d.style.display=(sel.value==='Custom Color'?'block':'none');\n";
+    html += "  });\n";
     html += "}\n";
-    html += "document.addEventListener('DOMContentLoaded',function(){\n";
-    html += "  var testMode = " + String(test_mode ? "true" : "false") + ";\n";
-    // Pass display types and show_bottom flags to JavaScript
-    html += "  var displayTypes = [";
-    for (int s = 0; s < NUM_SCREENS; s++) {
-        html += String(screen_configs[s].display_type);
-        if (s < NUM_SCREENS - 1) html += ",";
-    }
-    html += "];\n";
-    html += "  var showBottom = [";
-    for (int s = 0; s < NUM_SCREENS; s++) {
-        html += String(screen_configs[s].show_bottom ? "true" : "false");
-        if (s < NUM_SCREENS - 1) html += ",";
-    }
-    html += "];\n";
-    html += "  // Initialize all screen configs to show correct divs and disable hidden inputs FIRST\n";
-    html += "  for(var s=0; s<" + String(NUM_SCREENS) + "; s++) toggleGaugeConfig(s);\n";
-    html += "  // Now create test buttons - only for display types with calibration tables\n";
-    html += "  for (var s = 0; s < " + String(NUM_SCREENS) + "; ++s) {\n";
-    html += "    var displayType = displayTypes[s];\n";
-    html += "    // Only GAUGE (0) and GAUGE_NUMBER (4) have calibration tables with test buttons\n";
-    html += "    if (displayType !== 0 && displayType !== 4) continue;\n";
-    html += "    var maxGauges = (displayType === 0 && showBottom[s]) ? 2 : 1; // GAUGE with bottom enabled has 2 gauges, otherwise 1\n";
-    html += "    for (var g = 0; g < maxGauges; ++g) {\n";
-    html += "      for (var p = 0; p < 5; ++p) {\n";
-    html += "        var btn = document.createElement('button');\n";
-    html += "        btn.type = 'button';\n";
-    html += "        btn.innerText = 'Test';\n";
-    html += "        btn.disabled = !testMode;\n";
-    html += "        btn.style.cssText = 'padding:6px 12px;font-size:14px;font-weight:bold;background-color:'+(testMode?'#ff0000':'#999999')+';color:#ffffff;border:2px solid #000000;border-radius:4px;cursor:'+(testMode?'pointer':'not-allowed')+';display:inline-block;min-width:50px;position:relative;z-index:9999;';\n";
-    html += "        btn.onclick = (function(ss,gg,pp){ return function(){\n";
-    html += "          var angleInput = document.querySelector('input[name=\"angle_'+ss+'_'+gg+'_'+pp+'\"]');\n";
-    html += "          var testAngle = document.getElementById('testangle_'+ss+'_'+gg+'_'+pp);\n";
-    html += "          if(angleInput && testAngle){ testAngle.value = angleInput.value; }\n";
-    html += "          document.getElementById('testform_'+ss+'_'+gg+'_'+pp).submit();\n";
-    html += "        }; })(s,g,p);\n";
-    html += "        var holder = document.getElementById('testbtn_'+s+'_'+g+'_'+p);\n";
-    html += "        if(holder) {\n";
-    html += "          holder.appendChild(btn);\n";
-    html += "          if(g===0 && p===0) {\n";
-    html += "            var divName = (displayType === 0 || displayType === 4) ? 'gaugeconfig_' : 'gaugenumconfig_';\n";
-    html += "            var configDiv = document.getElementById(divName + s);\n";
-    html += "            var btnStyle = window.getComputedStyle(btn);\n";
-    html += "            console.log('Button for screen '+s+' (type '+displayType+'):', 'bgColor:', btnStyle.backgroundColor, 'color:', btnStyle.color, 'width:', btnStyle.width, 'height:', btnStyle.height, 'disabled:', btn.disabled);\n";
-    html += "          }\n";
-    html += "        } else {\n";
-    html += "          console.log('No holder found for testbtn_'+s+'_'+g+'_'+p);\n";
-    html += "        }\n";
-    html += "      }\n";
-    html += "    }\n";
-    html += "  }\n";
-    html += "  // Restore active tab from URL hash if present, else default to 0\n";
-    html += "  var initial = 0; if(location.hash && location.hash.indexOf('#tab')===0){ initial = parseInt(location.hash.replace('#tab',''))||0; }\n";
-    html += "  showScreenTab(initial);\n";
-    html += "});</script>\n";
-    // AJAX save — sends the form as POST via fetch(), returns tiny JSON.
-    // This eliminates the 302→GET cycle that re-sends 144 KB on every save,
-    // preventing lwIP pbuf fragmentation from exhausting internal RAM.
-    html += "<script>\n";
+
+    // AJAX save — POST only the visible screen's fields
     html += "function ajaxSave(){\n";
     html += "  var btn=document.getElementById('saveBtn');\n";
     html += "  if(btn){btn.disabled=true;btn.value='Saving...';}\n";
@@ -1458,47 +891,486 @@ void handle_gauges_page() {
     html += "    if(btn){btn.disabled=false;btn.value='Error - retry';}\n";
     html += "  });\n";
     html += "}\n";
-    html += "</script>";
-    html += "<p style='text-align:center;'><a href='/'>Back</a></p>";
+
+    // Toggle test mode via AJAX
+    html += "function toggleTestMode(){\n";
+    html += "  fetch('/toggle-test-mode',{method:'POST'})\n";
+    html += "  .then(function(r){return r.json();})\n";
+    html += "  .then(function(j){\n";
+    html += "    var btn=document.getElementById('testModeBtn');\n";
+    html += "    var lbl=document.getElementById('testModeLabel');\n";
+    html += "    if(j.test_mode){\n";
+    html += "      if(btn)btn.textContent='Disable Setup Mode';\n";
+    html += "      if(lbl){lbl.style.color='#388e3c';lbl.textContent='SETUP MODE ON';}\n";
+    html += "    } else {\n";
+    html += "      if(btn)btn.textContent='Enable Setup Mode';\n";
+    html += "      if(lbl){lbl.style.color='#b71c1c';lbl.textContent='SETUP MODE OFF';}\n";
+    html += "    }\n";
+    html += "    var prev=currentTab; currentTab=-1; showScreenTab(prev>=0?prev:0);\n";
+    html += "  }).catch(function(e){console.error(e);});\n";
+    html += "}\n";
+
+    // Test gauge point via AJAX (used by buttons inside screen fragment)
+    html += "function testGaugePoint(s,g,p){\n";
+    html += "  var ai=document.querySelector('input[name=\"angle_'+s+'_'+g+'_'+p+'\"]');\n";
+    html += "  var angle=ai?ai.value:'0';\n";
+    html += "  fetch('/test-gauge',{method:'POST',\n";
+    html += "    headers:{'Content-Type':'application/x-www-form-urlencoded'},\n";
+    html += "    body:'screen='+s+'&gauge='+g+'&point='+p+'&angle='+angle})\n";
+    html += "  .catch(function(e){console.error(e);});\n";
+    html += "}\n";
+
+    // Load first tab on page load
+    html += "document.addEventListener('DOMContentLoaded',function(){\n";
+    html += "  var initial=0;\n";
+    html += "  if(location.hash&&location.hash.indexOf('#tab')===0) initial=parseInt(location.hash.replace('#tab',''))||0;\n";
+    html += "  showScreenTab(initial);\n";
+    html += "});\n";
+    html += "</script>\n";
     html += "</div></body></html>";
-    Serial.printf("[GAUGES] page built, %u bytes, sending chunked\n", (unsigned)html.length());
+    flushHtml();
+
+    esp_task_wdt_reset();
+    config_server.sendContent(""); // chunked transfer terminator
+    Serial.printf("[GAUGES] shell complete, iRAM=%u\n",
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// handle_gauges_screen — AJAX endpoint returning HTML fragment for ONE screen
+// ═══════════════════════════════════════════════════════════════════════════
+void handle_gauges_screen() {
+    int s = config_server.arg("s").toInt();
+    if (s < 0 || s >= NUM_SCREENS) {
+        config_server.send(400, "text/plain", "Bad screen index");
+        return;
+    }
+    // Keep WS paused while config page is open — don't resume/re-pause
+    // per fragment, that thrashes TCP buffers and wastes iRAM.
+    g_config_page_last_seen = millis();
+    pause_signalk_ws();           // no-op if already paused
+
+    // NOTE: ui_set_screen() is called AFTER the HTTP response completes
+    // (see bottom of this function) to avoid LVGL DMA flushes during TCP sends.
+
+    extern bool test_mode;
+    const std::vector<String>& iconFiles = g_iconFiles;
+    const std::vector<String>& bgFiles   = g_bgFiles;
+
+    Serial.printf("[GAUGES] fragment s=%d, iRAM=%u\n", s,
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+
+    esp_task_wdt_reset();
+    Serial.println("[GAUGES] sending response header");
     Serial.flush();
-    // Send from static PSRAM-backed String in 8KB chunks.
-    // - Static string = no fragmentation (zero reallocs, all in PSRAM).
-    // - Chunked send = no TCP buffer overflow, no 3s WDT block.
-    esp_task_wdt_reset(); // reset before header write — setContentLength/send can block
-    config_server.sendHeader("Connection", "close");  // browser closes after response → no TIME_WAIT PCB on ESP32
-    config_server.setContentLength(html.length());
+    config_server.sendHeader("Connection", "close");
+    config_server.setContentLength(CONTENT_LENGTH_UNKNOWN);
     config_server.send(200, "text/html; charset=utf-8", "");
-    Serial.printf("[GAUGES] headers sent, starting body send iRAM=%u\n",
+    Serial.printf("[GAUGES] header sent, iRAM=%u\n",
         heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     Serial.flush();
-    const size_t CHUNK = 8192;
-    size_t offset = 0;
-    int chunk_num = 0;
-    while (offset < html.length()) {
-        esp_task_wdt_reset(); // reset BEFORE each chunk — not after, so chunk 0 stall can't expire WDT
-        size_t len = min(CHUNK, html.length() - offset);
-        config_server.sendContent(html.c_str() + offset, len);
-        offset += len;
-        chunk_num++;
-        if (chunk_num % 4 == 0) { // log every 32KB
-            Serial.printf("[GAUGES] sent %u/%u (chunk %d)\n", (unsigned)offset, (unsigned)html.length(), chunk_num);
-            Serial.flush();
-        }
+
+    // Re-use the SAME static String as handle_gauges_page() to avoid
+    // holding two 4096-byte buffers permanently in iRAM.
+    extern String g_http_html_buf;
+    extern bool   g_http_html_buf_reserved;
+    String& html = g_http_html_buf;
+    if (!g_http_html_buf_reserved) {
+        html.reserve(4096);
+        g_http_html_buf_reserved = true;
     }
-    esp_task_wdt_reset();
-    config_server.sendContent("");
-    Serial.printf("[GAUGES] send complete, %d chunks\n", chunk_num);
-    Serial.flush();
-    // All data sent — force RST so the PCB is freed immediately (no 60 s TIME_WAIT).
-    rst_close_client();
+    html.clear();
+    auto flushHtml = [&]() {
+        if (html.length() > 0) {
+            esp_task_wdt_reset();
+            config_server.sendContent(html);
+            html.clear();
+            // No lv_timer_handler() — fragment is small/fast (~5 KB),
+            // and calling it during HTTP I/O can trigger LVGL DMA flushes
+            // that race with TCP send-buffer allocations, causing crashes
+            // on repeated save→reload cycles.
+        }
+    };
+
+    // ── stream_screen_config inlined ─────────────────────────────────
+    html += "<h3>Screen " + String(s+1) + "</h3>";
+
+    // Display Type dropdown
+    html += "<div style='margin-bottom:16px;'><label>Display Type: <select name='displaytype_" + String(s) + "' id='displaytype_" + String(s) + "' onchange='toggleGaugeConfig(" + String(s) + ")'>";
+    const char* dtNames[] = {"Gauge","Number","Dual","Quad","Gauge + Number","Graph","Compass","Position"};
+    for (int dt = 0; dt < 8; ++dt) {
+        html += "<option value='" + String(dt) + "'";
+        if (screen_configs[s].display_type == dt) html += " selected";
+        html += ">" + String(dtNames[dt]) + "</option>";
+    }
+    html += "</select></label></div>";
+
+    // Background selection
+    String savedBg = String(screen_configs[s].background_path);
+    String savedBgNorm = savedBg; savedBgNorm.toLowerCase();
+    savedBgNorm.replace("S://", "S:/");
+    while (savedBgNorm.indexOf("//") != -1) savedBgNorm.replace("//", "/");
+    html += "<div style='margin-bottom:8px;'><label>Background: <select name='bg_" + String(s) + "' id='bg_image_" + String(s) + "' onchange='toggleBgImageColor(" + String(s) + ")'>";
+    html += "<option value=''";
+    if (savedBg.length() == 0) html += " selected='selected'";
+    html += ">Default</option>";
+    for (const auto& b : bgFiles) {
+        String iconNorm = b; iconNorm.toLowerCase();
+        iconNorm.replace("S://", "S:/");
+        while (iconNorm.indexOf("//") != -1) iconNorm.replace("//", "/");
+        html += "<option value='" + b + "'";
+        if (iconNorm == savedBgNorm && savedBg.length() > 0) html += " selected='selected'";
+        html += ">" + b + "</option>";
+    }
+    html += "<option value='Custom Color'";
+    if (savedBg == "Custom Color") html += " selected='selected'";
+    if (screen_configs[s].display_type == DISPLAY_TYPE_GAUGE ||
+        screen_configs[s].display_type == DISPLAY_TYPE_GAUGE_NUMBER) html += " hidden disabled";
+    html += ">Custom Color</option>";
+    html += "</select></label></div>";
+    flushHtml();
+
+    // ── Number display config ────────────────────────────────────────
+    bool isCustomColor = (String(screen_configs[s].background_path) == "Custom Color");
+    html += "<div id='numberconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == 1 ? "block" : "none") + ";'>";
+    html += "<h4>Number Display Settings</h4>";
+    html += "<div style='margin-bottom:8px;'><label>SignalK Path: <input name='number_path_" + String(s) + "' type='text' value='" + String(screen_configs[s].number_path) + "' style='width:80%'></label></div>";
+    html += "<div id='number_bg_color_div_" + String(s) + "' style='margin-bottom:8px;display:" + String(isCustomColor ? "block" : "none") + ";'>";
+    html += "<label>Background Color: <input name='number_bg_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].number_bg_color[0] ? screen_configs[s].number_bg_color : "#000000") + "'></label></div>";
+    html += "<div style='margin-bottom:8px;'><label>Font Size: <select name='number_font_size_" + String(s) + "'>";
+    html += "<option value='2'" + String(screen_configs[s].number_font_size <= 2 ? " selected" : "") + ">Large (96pt)</option>";
+    html += "<option value='3'" + String(screen_configs[s].number_font_size == 3 ? " selected" : "") + ">X-Large (120pt)</option>";
+    html += "<option value='4'" + String(screen_configs[s].number_font_size == 4 ? " selected" : "") + ">XX-Large (144pt)</option>";
+    html += "</select></label></div>";
+    html += "<div style='margin-bottom:8px;'><label>Font Color: <input name='number_font_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].number_font_color[0] ? screen_configs[s].number_font_color : "#FFFFFF") + "'></label></div>";
+    // Number alarms
+    html += "<div class='icon-section'><h5 style='margin:0 0 8px;'>Alarms</h5>";
+    html += "<div style='display:flex;gap:16px;flex-wrap:wrap;'>";
+    html += "<div><label>Low Alarm &lt; <input name='num_low_thresh_" + String(s) + "' type='number' step='any' value='" + String(screen_configs[s].min[0][1]) + "' style='width:90px'></label> ";
+    html += "<label><input type='checkbox' name='num_low_buz_" + String(s) + "'";
+    if (screen_configs[s].buzzer[0][1]) html += " checked";
+    html += "> Enable</label></div>";
+    html += "<div><label>High Alarm &gt; <input name='num_high_thresh_" + String(s) + "' type='number' step='any' value='" + String(screen_configs[s].max[0][2]) + "' style='width:90px'></label> ";
+    html += "<label><input type='checkbox' name='num_high_buz_" + String(s) + "'";
+    if (screen_configs[s].buzzer[0][2]) html += " checked";
+    html += "> Enable</label></div></div></div>";
+    html += "</div>"; // End number config
+    flushHtml();
+
+    // ── Compass config ───────────────────────────────────────────────
+    bool isMag = (String(screen_configs[s].number_path) == "navigation.headingMagnetic" ||
+                  String(screen_configs[s].number_path).length() == 0);
+    html += "<div id='compassconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == DISPLAY_TYPE_COMPASS ? "block" : "none") + ";'>";
+    html += "<h4>Compass Settings</h4>";
+    html += "<div style='margin-bottom:8px;'><label>Background Color: <input name='compass_bg_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].number_bg_color[0] ? screen_configs[s].number_bg_color : "#000000") + "'></label></div>";
+    html += "<div style='margin-bottom:8px;'>";
+    html += "<label style='margin-right:16px;'><input type='radio' name='compass_hdg_src_" + String(s) + "' value='navigation.headingMagnetic'";
+    if (isMag) html += " checked";
+    html += "> Magnetic (HDG &deg;M)</label>";
+    html += "<label><input type='radio' name='compass_hdg_src_" + String(s) + "' value='navigation.headingTrue'";
+    if (!isMag) html += " checked";
+    html += "> True (HDG &deg;T)</label></div>";
+    // Compass extra data fields
+    html += "<h4>Extra Data Fields</h4><div style='display:flex;gap:16px;flex-wrap:wrap;'>";
+    // BL
+    html += "<div style='flex:1;min-width:200px;'><h5>Bottom-Left</h5>";
+    html += "<div style='margin-bottom:4px;'><label>SignalK Path: <input name='quad_bl_path_" + String(s) + "' type='text' value='" + String(screen_configs[s].quad_bl_path) + "' style='width:90%'></label></div>";
+    html += "<div style='margin-bottom:4px;'><label>Font Size: <select name='quad_bl_font_size_" + String(s) + "'>";
+    html += "<option value='0'" + String(screen_configs[s].quad_bl_font_size == 0 ? " selected" : "") + ">Small (48pt)</option>";
+    html += "<option value='1'" + String(screen_configs[s].quad_bl_font_size == 1 ? " selected" : "") + ">Medium (72pt)</option>";
+    html += "<option value='2'" + String(screen_configs[s].quad_bl_font_size == 2 ? " selected" : "") + ">Large (96pt)</option>";
+    html += "</select></label></div>";
+    html += "<div style='margin-bottom:4px;'><label>Font Color: <input name='quad_bl_font_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].quad_bl_font_color[0] ? screen_configs[s].quad_bl_font_color : "#FFFFFF") + "'></label></div></div>";
+    // BR
+    html += "<div style='flex:1;min-width:200px;'><h5>Bottom-Right</h5>";
+    html += "<div style='margin-bottom:4px;'><label>SignalK Path: <input name='quad_br_path_" + String(s) + "' type='text' value='" + String(screen_configs[s].quad_br_path) + "' style='width:90%'></label></div>";
+    html += "<div style='margin-bottom:4px;'><label>Font Size: <select name='quad_br_font_size_" + String(s) + "'>";
+    html += "<option value='0'" + String(screen_configs[s].quad_br_font_size == 0 ? " selected" : "") + ">Small (48pt)</option>";
+    html += "<option value='1'" + String(screen_configs[s].quad_br_font_size == 1 ? " selected" : "") + ">Medium (72pt)</option>";
+    html += "<option value='2'" + String(screen_configs[s].quad_br_font_size == 2 ? " selected" : "") + ">Large (96pt)</option>";
+    html += "</select></label></div>";
+    html += "<div style='margin-bottom:4px;'><label>Font Color: <input name='quad_br_font_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].quad_br_font_color[0] ? screen_configs[s].quad_br_font_color : "#FFFFFF") + "'></label></div></div>";
+    html += "</div></div>"; // end compass
+    flushHtml();
+
+    // ── Dual display config ──────────────────────────────────────────
+    html += "<div id='dualconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == 2 ? "block" : "none") + ";'>";
+    html += "<h4>Dual Display Settings</h4>";
+    html += "<div id='dual_bg_color_div_" + String(s) + "' style='margin-bottom:8px;display:" + String(isCustomColor ? "block" : "none") + ";'>";
+    html += "<label>Background Color: <input name='dual_bg_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].number_bg_color[0] ? screen_configs[s].number_bg_color : "#000000") + "'></label></div>";
+    // Top
+    html += "<h5>Top Display</h5>";
+    html += "<div style='margin-bottom:8px;'><label>SignalK Path: <input name='dual_top_path_" + String(s) + "' type='text' value='" + String(screen_configs[s].dual_top_path) + "' style='width:80%'></label></div>";
+    html += "<div style='margin-bottom:8px;'><label>Font Size: <select name='dual_top_font_size_" + String(s) + "'>";
+    for (int fs = 0; fs < 5; fs++) {
+        const char* fsNames[] = {"Small (48pt)","Medium (72pt)","Large (96pt)","X-Large (120pt)","XX-Large (144pt)"};
+        html += "<option value='" + String(fs) + "'";
+        if (screen_configs[s].dual_top_font_size == fs) html += " selected";
+        html += ">" + String(fsNames[fs]) + "</option>";
+    }
+    html += "</select></label></div>";
+    html += "<div style='margin-bottom:8px;'><label>Font Color: <input name='dual_top_font_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].dual_top_font_color[0] ? screen_configs[s].dual_top_font_color : "#FFFFFF") + "'></label></div>";
+    // Top alarms
+    html += "<div class='icon-section'><h5 style='margin:0 0 6px;'>Alarms</h5><div style='display:flex;gap:16px;flex-wrap:wrap;'>";
+    html += "<label>Low &lt; <input name='dual_top_low_thresh_" + String(s) + "' type='number' step='any' value='" + String(screen_configs[s].min[0][1]) + "' style='width:90px'></label> ";
+    html += "<label><input type='checkbox' name='dual_top_low_buz_" + String(s) + "'";
+    if (screen_configs[s].buzzer[0][1]) html += " checked";
+    html += "> Enable</label> ";
+    html += "<label>High &gt; <input name='dual_top_high_thresh_" + String(s) + "' type='number' step='any' value='" + String(screen_configs[s].max[0][2]) + "' style='width:90px'></label> ";
+    html += "<label><input type='checkbox' name='dual_top_high_buz_" + String(s) + "'";
+    if (screen_configs[s].buzzer[0][2]) html += " checked";
+    html += "> Enable</label></div></div>";
+    flushHtml();
+    // Bottom
+    html += "<h5>Bottom Display</h5>";
+    html += "<div style='margin-bottom:8px;'><label>SignalK Path: <input name='dual_bottom_path_" + String(s) + "' type='text' value='" + String(screen_configs[s].dual_bottom_path) + "' style='width:80%'></label></div>";
+    html += "<div style='margin-bottom:8px;'><label>Font Size: <select name='dual_bottom_font_size_" + String(s) + "'>";
+    for (int fs = 0; fs < 5; fs++) {
+        const char* fsNames[] = {"Small (48pt)","Medium (72pt)","Large (96pt)","X-Large (120pt)","XX-Large (144pt)"};
+        html += "<option value='" + String(fs) + "'";
+        if (screen_configs[s].dual_bottom_font_size == fs) html += " selected";
+        html += ">" + String(fsNames[fs]) + "</option>";
+    }
+    html += "</select></label></div>";
+    html += "<div style='margin-bottom:8px;'><label>Font Color: <input name='dual_bottom_font_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].dual_bottom_font_color[0] ? screen_configs[s].dual_bottom_font_color : "#FFFFFF") + "'></label></div>";
+    // Bottom alarms
+    html += "<div class='icon-section'><h5 style='margin:0 0 6px;'>Alarms</h5><div style='display:flex;gap:16px;flex-wrap:wrap;'>";
+    html += "<label>Low &lt; <input name='dual_bot_low_thresh_" + String(s) + "' type='number' step='any' value='" + String(screen_configs[s].min[1][1]) + "' style='width:90px'></label> ";
+    html += "<label><input type='checkbox' name='dual_bot_low_buz_" + String(s) + "'";
+    if (screen_configs[s].buzzer[1][1]) html += " checked";
+    html += "> Enable</label> ";
+    html += "<label>High &gt; <input name='dual_bot_high_thresh_" + String(s) + "' type='number' step='any' value='" + String(screen_configs[s].max[1][2]) + "' style='width:90px'></label> ";
+    html += "<label><input type='checkbox' name='dual_bot_high_buz_" + String(s) + "'";
+    if (screen_configs[s].buzzer[1][2]) html += " checked";
+    html += "> Enable</label></div></div>";
+    html += "</div>"; // End dual config
+    flushHtml();
+
+    // ── Quad display config ──────────────────────────────────────────
+    html += "<div id='quadconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == 3 ? "block" : "none") + ";'>";
+    html += "<h4>Quad Display Settings</h4>";
+    html += "<div style='margin-bottom:8px;'><label>Background Color: <input name='quad_bg_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].number_bg_color[0] ? screen_configs[s].number_bg_color : "#000000") + "'></label></div>";
+    // Quad quadrant helper
+    auto addQuadrantHTML = [&](const char* name, const char* label, char* path, uint8_t size, char* color, int g_alm, int zl, int zh) {
+        html += "<h5>" + String(label) + "</h5>";
+        html += "<div style='margin-bottom:4px;'><label>SignalK Path: <input name='quad_" + String(name) + "_path_" + String(s) + "' type='text' value='" + String(path) + "' style='width:80%'></label></div>";
+        html += "<div style='margin-bottom:4px;'><label>Font Size: <select name='quad_" + String(name) + "_font_size_" + String(s) + "'>";
+        for (int fs = 0; fs < 3; fs++) {
+            const char* n[] = {"Small (48pt)","Medium (72pt)","Large (96pt)"};
+            html += "<option value='" + String(fs) + "'";
+            if (size == fs) html += " selected";
+            html += ">" + String(n[fs]) + "</option>";
+        }
+        html += "</select></label></div>";
+        html += "<div style='margin-bottom:4px;'><label>Font Color: <input name='quad_" + String(name) + "_font_color_" + String(s) + "' type='color' value='" + String(color[0] ? color : "#FFFFFF") + "'></label></div>";
+        html += "<div class='icon-section'><h5 style='margin:0 0 6px;'>Alarms</h5><div style='display:flex;gap:8px;flex-wrap:wrap;'>";
+        html += "<label>Low &lt; <input name='quad_" + String(name) + "_low_thresh_" + String(s) + "' type='number' step='any' value='" + String(screen_configs[s].min[g_alm][zl]) + "' style='width:80px'></label> ";
+        html += "<label><input type='checkbox' name='quad_" + String(name) + "_low_buz_" + String(s) + "'";
+        if (screen_configs[s].buzzer[g_alm][zl]) html += " checked";
+        html += "> Enable</label> ";
+        html += "<label>High &gt; <input name='quad_" + String(name) + "_high_thresh_" + String(s) + "' type='number' step='any' value='" + String(screen_configs[s].max[g_alm][zh]) + "' style='width:80px'></label> ";
+        html += "<label><input type='checkbox' name='quad_" + String(name) + "_high_buz_" + String(s) + "'";
+        if (screen_configs[s].buzzer[g_alm][zh]) html += " checked";
+        html += "> Enable</label></div></div>";
+    };
+    addQuadrantHTML("tl", "Top-Left",     screen_configs[s].quad_tl_path, screen_configs[s].quad_tl_font_size, screen_configs[s].quad_tl_font_color, 0, 1, 2);
+    flushHtml();
+    addQuadrantHTML("tr", "Top-Right",    screen_configs[s].quad_tr_path, screen_configs[s].quad_tr_font_size, screen_configs[s].quad_tr_font_color, 0, 3, 4);
+    flushHtml();
+    addQuadrantHTML("bl", "Bottom-Left",  screen_configs[s].quad_bl_path, screen_configs[s].quad_bl_font_size, screen_configs[s].quad_bl_font_color, 1, 1, 2);
+    flushHtml();
+    addQuadrantHTML("br", "Bottom-Right", screen_configs[s].quad_br_path, screen_configs[s].quad_br_font_size, screen_configs[s].quad_br_font_color, 1, 3, 4);
+    flushHtml();
+    html += "</div>"; // End quad config
+    flushHtml();
+
+    // ── Gauge config ─────────────────────────────────────────────────
+    html += "<div id='gaugeconfig_" + String(s) + "' style='display:" + String((screen_configs[s].display_type == 0 || screen_configs[s].display_type == 4) ? "block" : "none") + ";'>";
+    for (int g = 0; g < 2; ++g) {
+        if (g == 0) {
+            html += "<div style='margin-bottom:8px;'><label>Show Bottom Gauge: <input type='checkbox' name='showbottom_" + String(s) + "'";
+            if (screen_configs[s].show_bottom) html += " checked";
+            html += "></label></div>";
+        }
+        int idx = s * 2 + g;
+        if (g == 1 && !screen_configs[s].show_bottom) {
+            html += "<div style='margin-bottom:8px;'><em>Bottom gauge disabled for this screen.</em></div>";
+            continue;
+        }
+        html += "<b>" + String(g == 0 ? "Top Gauge" : "Bottom Gauge") + "</b>";
+        html += "<div style='margin-bottom:8px;'><label>SignalK Path: <input name='skpath_" + String(s) + "_" + String(g) + "' type='text' value='" + signalk_paths[idx] + "' style='width:80%'></label></div>";
+        // Calibration points
+        html += "<table class='table'><tr><th>Point</th><th>Angle</th><th>Value</th><th>Test</th></tr>";
+        for (int p = 0; p < 5; ++p) {
+            html += "<tr><td>" + String(p+1) + "</td>";
+            html += "<td><input name='angle_" + String(s) + "_" + String(g) + "_" + String(p) + "' type='number' value='" + String(gauge_cal[s][g][p].angle) + "'></td>";
+            html += "<td><input name='value_" + String(s) + "_" + String(g) + "_" + String(p) + "' type='number' step='any' value='" + String(gauge_cal[s][g][p].value) + "'></td>";
+            html += "<td><button type='button' onclick='testGaugePoint(" + String(s) + "," + String(g) + "," + String(p) + ")' ";
+            html += (test_mode ? "" : "disabled ");
+            html += "style='padding:4px 8px;font-size:0.9em;background-color:";
+            html += (test_mode ? "#4a90e2" : "#cccccc");
+            html += ";color:#fff;border:1px solid #2d5a8f;border-radius:4px;cursor:";
+            html += (test_mode ? "pointer" : "not-allowed");
+            html += ";'>Test</button></td></tr>";
+        }
+        html += "</table>";
+        // Icon controls
+        String savedIcon = String(screen_configs[s].icon_paths[g]);
+        String savedIconNorm = savedIcon; savedIconNorm.toLowerCase();
+        savedIconNorm.replace("S://", "S:/");
+        while (savedIconNorm.indexOf("//") != -1) savedIconNorm.replace("//", "/");
+        html += "<div class='icon-section'><div class='icon-row'>";
+        html += "<div style='margin-bottom:8px;'><label>Icon: <select name='icon_" + String(s) + "_" + String(g) + "'>";
+        html += "<option value=''";
+        if (savedIcon.length() == 0) html += " selected='selected'";
+        html += ">None</option>";
+        for (const auto& icon : iconFiles) {
+            String iconNorm = icon; iconNorm.toLowerCase();
+            iconNorm.replace("S://", "S:/");
+            while (iconNorm.indexOf("//") != -1) iconNorm.replace("//", "/");
+            html += "<option value='" + icon + "'";
+            if (iconNorm == savedIconNorm && savedIcon.length() > 0) html += " selected='selected'";
+            html += ">" + icon + "</option>";
+        }
+        html += "</select></label></div>";
+        // Icon position
+        int curPos = screen_configs[s].icon_pos[g];
+        html += "<div style='margin-bottom:8px;'><label>Icon Position: <select name='iconpos_" + String(s) + "_" + String(g) + "'>";
+        struct { int v; const char *n; } posopts[] = { {0,"Top"}, {1,"Right"}, {2,"Bottom"}, {3,"Left"} };
+        for (int _po = 0; _po < 4; ++_po) {
+            html += "<option value='" + String(posopts[_po].v) + "'";
+            if (curPos == posopts[_po].v) html += " selected='selected'";
+            html += ">" + String(posopts[_po].n) + "</option>";
+        }
+        html += "</select></label></div></div>"; // close icon-row
+        // Zone controls
+        html += "<div class='zone-row'>";
+        for (int i = 1; i <= 4; ++i) {
+            float minVal = screen_configs[s].min[g][i];
+            float maxVal = screen_configs[s].max[g][i];
+            String colorVal = safeColor(screen_configs[s].color[g][i], "#000000");
+            bool transVal = screen_configs[s].transparent[g][i] != 0;
+            bool bzrVal = screen_configs[s].buzzer[g][i] != 0;
+            html += "<div class='zone-item'><label>Min " + String(i) + ": <input name='mnv" + String(s) + String(g) + String(i) + "' type='number' step='any' value='" + String(minVal) + "' style='width:100px'></label></div>";
+            html += "<div class='zone-item'><label>Max " + String(i) + ": <input name='mxv" + String(s) + String(g) + String(i) + "' type='number' step='any' value='" + String(maxVal) + "' style='width:100px'></label></div>";
+            html += "<div class='zone-item'><label>Color: <input class='color-input' name='clr" + String(s) + String(g) + String(i) + "' type='color' value='" + colorVal + "'></label></div>";
+            html += "<div class='zone-item small'><label>Transparent <input name='trn" + String(s) + String(g) + String(i) + "' type='checkbox'";
+            if (transVal) html += " checked";
+            html += "></label></div>";
+            html += "<div class='zone-item small'><label>Buzzer <input name='bzr" + String(s) + String(g) + String(i) + "' type='checkbox'";
+            if (bzrVal) html += " checked";
+            html += "></label></div>";
+        }
+        html += "</div></div>"; // close zone-row + icon-section
+        flushHtml();
+    }
+    html += "</div>"; // close gaugeconfig div
+    flushHtml();
+
+    // ── Gauge + Number config ────────────────────────────────────────
+    html += "<div id='gaugenumconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == 4 ? "block" : "none") + ";'>";
+    html += "<h4>Center Number Display</h4>";
+    html += "<div style='margin-bottom:8px;'><label>SignalK Path: <input name='gauge_num_center_path_" + String(s) + "' type='text' value='" + String(screen_configs[s].gauge_num_center_path) + "' style='width:80%'></label></div>";
+    html += "<div style='margin-bottom:8px;'><label>Font Size: <select name='gauge_num_center_font_size_" + String(s) + "'>";
+    for (int fs = 0; fs < 5; fs++) {
+        const char* fsNames[] = {"Small (48pt)","Medium (72pt)","Large (96pt)","X-Large (120pt)","XX-Large (144pt)"};
+        html += "<option value='" + String(fs) + "'";
+        if (screen_configs[s].gauge_num_center_font_size == fs) html += " selected";
+        html += ">" + String(fsNames[fs]) + "</option>";
+    }
+    html += "</select></label></div>";
+    html += "<div style='margin-bottom:8px;'><label>Font Color: <input name='gauge_num_center_font_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].gauge_num_center_font_color[0] ? screen_configs[s].gauge_num_center_font_color : "#FFFFFF") + "'></label></div>";
+    // Center number alarms
+    html += "<div class='icon-section'><h5 style='margin:0 0 8px;'>Alarms</h5><div style='display:flex;gap:16px;flex-wrap:wrap;'>";
+    html += "<div><label>Low Alarm &lt; <input name='gnum_low_thresh_" + String(s) + "' type='number' step='any' value='" + String(screen_configs[s].min[1][1]) + "' style='width:90px'></label> ";
+    html += "<label><input type='checkbox' name='gnum_low_buz_" + String(s) + "'";
+    if (screen_configs[s].buzzer[1][1]) html += " checked";
+    html += "> Enable</label></div>";
+    html += "<div><label>High Alarm &gt; <input name='gnum_high_thresh_" + String(s) + "' type='number' step='any' value='" + String(screen_configs[s].max[1][2]) + "' style='width:90px'></label> ";
+    html += "<label><input type='checkbox' name='gnum_high_buz_" + String(s) + "'";
+    if (screen_configs[s].buzzer[1][2]) html += " checked";
+    html += "> Enable</label></div></div></div>";
+    html += "</div>"; // close gaugenumconfig
+    flushHtml();
+
+    // ── Graph config ─────────────────────────────────────────────────
+    html += "<div id='graphconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == 5 ? "block" : "none") + ";'>";
+    html += "<h4>Graph Display Settings</h4>";
+    html += "<div style='margin-bottom:8px;'><label>SignalK Path: <input name='graph_path_1_" + String(s) + "' type='text' value='" + String(screen_configs[s].number_path) + "' style='width:80%'></label></div>";
+    html += "<div style='margin-bottom:8px;'><label>Chart Type: <select name='graph_chart_type_" + String(s) + "'>";
+    const char* ctNames[] = {"Line Chart","Bar Chart","Scatter Plot"};
+    for (int ct = 0; ct < 3; ct++) {
+        html += "<option value='" + String(ct) + "'";
+        if (screen_configs[s].graph_chart_type == ct) html += " selected";
+        html += ">" + String(ctNames[ct]) + "</option>";
+    }
+    html += "</select></label></div>";
+    html += "<div style='margin-bottom:8px;'><label>Time Range: <select name='graph_time_range_" + String(s) + "'>";
+    const char* trNames[] = {"10 seconds","30 seconds","1 minute","5 minutes","10 minutes","30 minutes"};
+    for (int tr = 0; tr < 6; tr++) {
+        html += "<option value='" + String(tr) + "'";
+        if (screen_configs[s].graph_time_range == tr) html += " selected";
+        html += ">" + String(trNames[tr]) + "</option>";
+    }
+    html += "</select></label></div>";
+    html += "<div style='margin-bottom:8px;'><label>Series 1 Color: <input name='graph_color_1_" + String(s) + "' type='color' value='" + String(screen_configs[s].number_font_color[0] ? screen_configs[s].number_font_color : "#00FF00") + "'></label></div>";
+    html += "<h5 style='margin-top:16px;'>Second Data Series (Optional)</h5>";
+    html += "<div style='margin-bottom:8px;'><label>SignalK Path 2: <input name='graph_path_2_" + String(s) + "' type='text' value='" + String(screen_configs[s].graph_path_2) + "' style='width:80%'></label></div>";
+    html += "<div style='margin-bottom:8px;'><label>Series 2 Color: <input name='graph_color_2_" + String(s) + "' type='color' value='" + String(screen_configs[s].graph_color_2[0] ? screen_configs[s].graph_color_2 : "#FF0000") + "'></label></div>";
+    bool isCustomColorGraph = (String(screen_configs[s].background_path) == "Custom Color");
+    html += "<div id='graph_bg_color_div_" + String(s) + "' style='margin-bottom:8px;display:" + String(isCustomColorGraph ? "block" : "none") + ";'>";
+    html += "<label>Background Color: <input name='graph_bg_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].number_bg_color[0] ? screen_configs[s].number_bg_color : "#000000") + "'></label></div>";
+    html += "</div>"; // close graphconfig
+    flushHtml();
+
+    // ── Position Display config ──────────────────────────────────────
+    html += "<div id='positionconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == 7 ? "block" : "none") + ";'>";
+    html += "<h4>Position Display Settings</h4>";
+    html += "<div style='margin-bottom:8px;'><label>Coordinate Format: <select name='pos_coord_format_" + String(s) + "'>";
+    const char* cfNames[] = {"Decimal Degrees (DD)","Degrees Minutes Seconds (DMS)","Degrees Decimal Minutes (DDM)"};
+    for (int cf = 0; cf < 3; cf++) {
+        html += "<option value='" + String(cf) + "'";
+        if (screen_configs[s].number_font_size == cf) html += " selected";
+        html += ">" + String(cfNames[cf]) + "</option>";
+    }
+    html += "</select></label></div>";
+    html += "<div style='margin-bottom:8px;'><label>Lat/Lon Colour: <input name='pos_latlon_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].pos_latlon_color[0] ? screen_configs[s].pos_latlon_color : "#ffffff") + "'></label></div>";
+    html += "<div style='margin-bottom:8px;'><label>Time Colour: <input name='pos_time_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].pos_time_color[0] ? screen_configs[s].pos_time_color : "#64dcb4") + "'></label></div>";
+    html += "<div style='margin-bottom:8px;'><label>Divider / Title Colour: <input name='pos_divider_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].pos_divider_color[0] ? screen_configs[s].pos_divider_color : "#324678") + "'></label></div>";
+    bool isCustomColorPos = (String(screen_configs[s].background_path) == "Custom Color");
+    html += "<div id='pos_bg_color_div_" + String(s) + "' style='margin-bottom:8px;display:" + String(isCustomColorPos ? "block" : "none") + ";'>";
+    html += "<label>Background Colour: <input name='pos_bg_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].number_bg_color[0] ? screen_configs[s].number_bg_color : "#000000") + "'></label></div>";
+    html += "</div>"; // close positionconfig
+    flushHtml();
+
+    config_server.sendContent(""); // chunked terminator
+    Serial.printf("[GAUGES] fragment s=%d complete, iRAM=%u\n", s,
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+
+    // Switch the physical display AFTER the HTTP response is fully sent.
+    // Doing it before/during the response caused LVGL DMA flushes to race
+    // with TCP send-buffer allocations, leading to crashes on the 2nd or
+    // 3rd save→reload cycle.
+    ui_set_screen(s + 1);         // 1-based
+
+    // Keep WS paused — the 60-second g_config_page_last_seen watchdog
+    // (or navigating away) will resume it.  Do NOT resume here;
+    // the browser may fetch the next tab seconds later and we'd
+    // be thrashing TCP buffers with reconnect/disconnect cycles.
 }
 
 void handle_save_gauges() {
     if (config_server.method() == HTTP_POST) {
         bool reboot_needed = false;
-        for (int s = 0; s < NUM_SCREENS; ++s) {
+        // AJAX save sends only one screen's fields + save_screen=N
+        int save_only = -1;
+        if (config_server.hasArg("save_screen")) {
+            save_only = config_server.arg("save_screen").toInt();
+            if (save_only < 0 || save_only >= NUM_SCREENS) save_only = -1;
+        }
+        int s_start = (save_only >= 0) ? save_only : 0;
+        int s_end   = (save_only >= 0) ? save_only + 1 : NUM_SCREENS;
+        for (int s = s_start; s < s_end; ++s) {
             for (int g = 0; g < 2; ++g) {
                 int idx = s * 2 + g;
                 // Save SignalK path
@@ -1862,19 +1734,55 @@ void handle_save_gauges() {
         }
         // Attempt to write per-screen binary configs to SD immediately so toggles
         // (like show_bottom) persist even if NVS writes fail or are delayed.
+        //
+        // iRAM strategy: pause_signalk_ws() disconnects the WS (freeing ~22 KB WS
+        // receive buffer) before every SD write block. This is called here in the
+        // save handler — not just in handle_gauges_page() — because the WS reconnects
+        // seconds after each save so subsequent saves arrive with iRAM already low.
+        // Pausing here guarantees ~22 KB headroom for SDMMC DMA on every save.
+        // A short yield after the pause lets lwIP free any remaining TCP buffers.
+        pause_signalk_ws();
+        {
+            const size_t IRAM_MIN_FOR_SD = 20 * 1024;
+            size_t iram_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+            if (iram_free < IRAM_MIN_FOR_SD) {
+                Serial.printf("[SD SAVE] iRAM still low after WS pause (%u B), yielding...\n", iram_free);
+                Serial.flush();
+                for (int w = 0; w < 20; w++) {  // up to 1s
+                    vTaskDelay(pdMS_TO_TICKS(50));
+                    esp_task_wdt_reset();
+                    iram_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+                    if (iram_free >= IRAM_MIN_FOR_SD) break;
+                }
+                Serial.printf("[SD SAVE] iRAM after yield: %u B\n", iram_free);
+                Serial.flush();
+            }
+        }
         if (!SD_MMC.exists("/config")) SD_MMC.mkdir("/config");
         int sd_ok_count = 0;
-        for (int s2 = 0; s2 < NUM_SCREENS; ++s2) {
-            char sdpath[64];
-            snprintf(sdpath, sizeof(sdpath), "/config/screen%d.bin", s2);
-            File sf = SD_MMC.open(sdpath, FILE_WRITE);
+        // Batch write: all screens in one file — 3 FAT ops instead of 15
+        {
+            size_t total = sizeof(ScreenConfig) * NUM_SCREENS;
+            File sf;
+            for (int retry = 0; retry < 3 && !sf; retry++) {
+                if (retry > 0) { vTaskDelay(pdMS_TO_TICKS(50)); esp_task_wdt_reset(); }
+                sf = SD_MMC.open("/config/screens.bin.tmp", FILE_WRITE);
+            }
             if (sf) {
-                size_t wrote = sf.write((const uint8_t *)&screen_configs[s2], sizeof(ScreenConfig));
+                size_t wrote = sf.write((const uint8_t *)screen_configs, total);
                 sf.close();
-                Serial.printf("[SD SAVE] Immediate wrote '%s' -> %u bytes\n", sdpath, (unsigned)wrote);
-                if (wrote == sizeof(ScreenConfig)) sd_ok_count++;
+                if (wrote == total) {
+                    SD_MMC.remove("/config/screens.bin");  // remove old only after full write
+                    SD_MMC.rename("/config/screens.bin.tmp", "/config/screens.bin");  // atomic replace
+                    Serial.printf("[SD SAVE] Wrote /config/screens.bin -> %u bytes\n", (unsigned)wrote);
+                    sd_ok_count = NUM_SCREENS;
+                } else {
+                    SD_MMC.remove("/config/screens.bin.tmp");  // discard partial; original intact
+                    Serial.printf("[SD SAVE] Short write /config/screens.bin -> %u/%u B, original preserved\n",
+                                  (unsigned)wrote, (unsigned)total);
+                }
             } else {
-                Serial.printf("[SD SAVE] Immediate failed to open '%s' for writing\n", sdpath);
+                Serial.println("[SD SAVE] Failed to open /config/screens.bin.tmp for writing");
             }
         }
         bool sd_all_ok = (sd_ok_count == NUM_SCREENS);
@@ -1886,12 +1794,18 @@ void handle_save_gauges() {
         // an SD text file (one path per line) and skip save_preferences() entirely
         // when SD is healthy. WiFi/device settings don't change on this page.
         if (sd_all_ok) {
-            File spf = SD_MMC.open("/config/signalk_paths.txt", FILE_WRITE);
+            File spf;
+            for (int retry = 0; retry < 3 && !spf; retry++) {
+                if (retry > 0) { vTaskDelay(pdMS_TO_TICKS(50)); esp_task_wdt_reset(); }
+                spf = SD_MMC.open("/config/signalk_paths.tmp", FILE_WRITE);
+            }
             if (spf) {
                 for (int i = 0; i < NUM_SCREENS * 2; ++i) {
                     spf.println(signalk_paths[i]);
                 }
                 spf.close();
+                SD_MMC.remove("/config/signalk_paths.txt");
+                SD_MMC.rename("/config/signalk_paths.tmp", "/config/signalk_paths.txt");
                 Serial.println("[SD SAVE] Wrote /config/signalk_paths.txt");
             } else {
                 Serial.println("[SD SAVE] Failed to write /config/signalk_paths.txt — falling back to NVS");
@@ -1903,9 +1817,11 @@ void handle_save_gauges() {
             save_preferences(false);
         }
 
-        // Refresh Signal K subscriptions immediately in case any SK paths changed
-        // (safe to call even if WS not connected; function will no-op locally)
-        refresh_signalk_subscriptions();
+        // Do NOT schedule WS resume here — the user is still on the config page
+        // and will immediately re-pause WS when clicking another tab.  Resuming
+        // creates a connect→disconnect cycle whose TIME_WAIT PCBs consume hidden
+        // iRAM and crash the next fragment.  The 10-second idle watchdog in loop()
+        // resumes WS automatically once the user stops accessing the config page.
         // Note: fetch_all_metadata() intentionally NOT called here — it makes blocking
         // HTTP requests (up to 1.5s each × many paths) which causes WDT on Core 1.
         // Metadata is fetched automatically on WS connect (wsEvent WStype_CONNECTED).
@@ -1915,15 +1831,20 @@ void handle_save_gauges() {
         // from the HTTP handler, which races with the display DMA flush and corrupts
         // the heap after repeated page-builds, causing LoadProhibited crashes.
         g_pending_visual_apply = true;
-        for (int i = 0; i < 5; i++) g_screens_need_apply[i] = true;
+        // Only mark the screen(s) that were actually saved — rebuilding all 5
+        // wastes iRAM on SD background-image DMA reads for unchanged screens.
+        if (save_only >= 0) {
+            g_screens_need_apply[save_only] = true;
+        } else {
+            for (int i = 0; i < 5; i++) g_screens_need_apply[i] = true;
+        }
         skip_next_load_preferences = true;
 
+        // Keep the config-page idle watchdog alive so the 60-second auto-resume
+        // doesn't fire while the user is still editing after a save.
+        g_config_page_last_seen = millis();
+
         // Return tiny JSON — browser stays on the same page (AJAX save).
-        // This eliminates the redirect→GET /gauges cycle that sent 144 KB
-        // of HTML on every save, causing lwIP iRAM fragmentation and crashes.
-        // NOTE: no rst_close_client() here — the browser must receive this
-        // response cleanly so the fetch().then() callback fires ("Saved!").
-        // A 20-byte response creates negligible TIME_WAIT PCB pressure.
         config_server.sendHeader("Connection", "close");
         config_server.send(200, "application/json", "{\"ok\":true}");
         return;
@@ -2225,6 +2146,7 @@ void setup_network() {
     // Register web UI routes and start server
     config_server.on("/", handle_root);
     config_server.on("/gauges", handle_gauges_page);
+    config_server.on("/gauges/screen", handle_gauges_screen);
     config_server.on("/save-gauges", HTTP_POST, handle_save_gauges);
     config_server.on("/needles", handle_needles_page);
     config_server.on("/save-needles", HTTP_POST, handle_save_needles);

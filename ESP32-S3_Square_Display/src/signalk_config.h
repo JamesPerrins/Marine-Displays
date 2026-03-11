@@ -74,6 +74,16 @@ void init_sensor_mutex();
 // Signal K control functions
 void enable_signalk(const char* ssid, const char* password, const char* server_ip, uint16_t server_port);
 void disable_signalk();
+// Temporarily disconnect WS while config UI is open (frees ~22KB WS receive buffer)
+void pause_signalk_ws();
+// Returns true if WS is currently paused (for watchdog checks)
+bool is_signalk_ws_paused();
+// Resume WS connection after config save; reconnects automatically
+void resume_signalk_ws();
+// Defer WS resume until after the next apply_all_screen_visuals() in the main loop.
+// Use this from HTTP handlers so LVGL SD image reads happen while iRAM is free.
+void schedule_signalk_ws_resume();
+extern volatile bool g_signalk_ws_resume_pending;
 // Rebuild and (re)send Signal K subscription list from current configuration
 void refresh_signalk_subscriptions();
 // Fetch metadata for all configured paths (gauges, number, dual displays)

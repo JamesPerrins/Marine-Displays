@@ -48,7 +48,7 @@
 #define LV_INDEV_DEF_READ_PERIOD 10 /* Read input every 10ms for responsive touch */
 
 /* Cache adjacent screens for instant swiping with binary images */
-#define LV_IMG_CACHE_DEF_SIZE 3     /* Cache current + adjacent screens */
+#define LV_IMG_CACHE_DEF_SIZE 32    /* Large enough for all bg + icon images across 5 screens */
 
 /* Enable logging to debug image loading issues */
 #define LV_USE_LOG 1

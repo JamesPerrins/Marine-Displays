@@ -339,6 +339,22 @@ void save_preferences(bool skip_screen_blobs = false) {
         preferences.end();
     }
 
+    // Always keep an SD backup of WiFi/SK credentials so NVS erase+restore
+    // failures don't permanently lose them. Written on every save.
+    {
+        File bak = SD_MMC.open("/config/wifi_backup.txt", FILE_WRITE);
+        if (bak) {
+            bak.println(saved_ssid);
+            bak.println(saved_password);
+            bak.println(saved_signalk_ip);
+            bak.println(String(saved_signalk_port));
+            bak.println(saved_cf_client_id);
+            bak.println(saved_cf_client_secret);
+            bak.println(saved_hostname);
+            bak.close();
+        }
+    }
+
     // Try to save per-screen blobs via NVS (skipped when SD writes succeeded to avoid iRAM NVS page-cache growth)
     nvs_handle_t nvs_handle;
     esp_err_t nvs_err = skip_screen_blobs ? ESP_ERR_NVS_NOT_FOUND : nvs_open(PREF_NAMESPACE, NVS_READWRITE, &nvs_handle);
@@ -536,6 +552,23 @@ void load_preferences() {
         }
         preferences.end();
     }
+    // If NVS lost WiFi credentials (e.g. after nvs_flash_erase), restore from SD backup.
+    if (saved_ssid.length() == 0 && SD_MMC.exists("/config/wifi_backup.txt")) {
+        File bak = SD_MMC.open("/config/wifi_backup.txt", FILE_READ);
+        if (bak) {
+            saved_ssid             = bak.readStringUntil('\n'); saved_ssid.trim();
+            saved_password         = bak.readStringUntil('\n'); saved_password.trim();
+            saved_signalk_ip       = bak.readStringUntil('\n'); saved_signalk_ip.trim();
+            String port_str        = bak.readStringUntil('\n'); port_str.trim();
+            saved_signalk_port     = (uint16_t)port_str.toInt();
+            saved_cf_client_id     = bak.readStringUntil('\n'); saved_cf_client_id.trim();
+            saved_cf_client_secret = bak.readStringUntil('\n'); saved_cf_client_secret.trim();
+            saved_hostname         = bak.readStringUntil('\n'); saved_hostname.trim();
+            bak.close();
+            Serial.println("[SD LOAD] WiFi credentials restored from /config/wifi_backup.txt");
+        }
+    }
+
     // Load SignalK paths: SD primary (authoritative), NVS as legacy fallback.
     bool any_path_set = false;
     // Gauge saves now write to SD directly (no NVS Preferences churn),

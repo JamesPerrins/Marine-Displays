@@ -1597,9 +1597,8 @@ void loop() {
 
     Lvgl_Loop();
 
-    // WS idle watchdog: if the user opened the config page but closed the browser
-    // without saving, the WS stays paused forever. Auto-resume after 60s of
-    // config page inactivity so gauges continue updating normally.
+    // Idle watchdog: if the user opened the config page but closed the browser
+    // without saving, the data source stays paused. Auto-resume after 60s.
     {
         static unsigned long last_ws_watchdog = 0;
         unsigned long now_wd = millis();
@@ -1609,10 +1608,11 @@ void loop() {
                     && !g_signalk_ws_resume_pending
                     && g_config_page_last_seen != 0
                     && (now_wd - g_config_page_last_seen) >= 60000UL) {
-                Serial.printf("[SK] Config page idle >60s (iRAM=%u), auto-resuming WS\n",
+                Serial.printf("[SK] Config page idle >60s (iRAM=%u), auto-resuming\n",
                               heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
                 g_config_page_last_seen = 0;
                 resume_signalk_ws();
+                resume_mqtt();
             }
         }
     }

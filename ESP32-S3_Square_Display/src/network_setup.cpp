@@ -10,6 +10,7 @@
 #include <set>
 #include "network_setup.h"
 #include "signalk_config.h"
+#include "mqtt_config.h"
 #include "gauge_config.h"
 #include "screen_config_c_api.h"
 #include <FS.h>
@@ -843,11 +844,10 @@ void handle_gauges_page() {
     // updated after every save, so calling load_preferences() here is redundant
     // and causes SD/WiFi DMA contention that drops the SK WebSocket.
     skip_next_load_preferences = false; // consume flag if set
-    // Disconnect SignalK WebSocket while the config page is open so its ~22KB
-    // receive buffer is freed before we build and send the large HTML page.
-    // This ensures enough contiguous iRAM remains for SD DMA writes on save.
-    // The connection is restored automatically in handle_save_gauges().
+    // Disconnect data source while the config page is open to free Core 0 bandwidth
+    // and iRAM. Restored on save or via the main-loop watchdog.
     pause_signalk_ws();
+    pause_mqtt();
     g_config_page_last_seen = millis();  // watchdog: auto-resume if page closes without saving
     Serial.printf("[GAUGES] handler entered, iRAM=%u\n",
         heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
@@ -859,20 +859,29 @@ void handle_gauges_page() {
     config_server.sendHeader("Connection", "close");
     config_server.setContentLength(CONTENT_LENGTH_UNKNOWN);
     config_server.send(200, "text/html; charset=utf-8", "");
-    Serial.println("[GAUGES] headers sent, streaming HTML");
-    // Small working buffer: each section is flushed as it is built.
-    // No 200KB PSRAM reservation — peak internal RAM from TCP send buffers stays
-    // low because lwIP can ACK and free PBUFs between flushes.
+    // Disable Nagle algorithm: each sendContent() chunk is sent immediately
+    // without waiting to batch with other data. Prevents the "chunk-header
+    // sent but data held by Nagle" stall that contributes to slow page loads.
+    {
+        WiFiClient cl = config_server.client();
+        if (cl) {
+            int flag = 1;
+            setsockopt(cl.fd(), IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+        }
+    }
+    Serial.printf("[GAUGES] headers sent, streaming HTML t=%lu\n", millis());
+    // Working buffer: accumulated per screen and flushed once per screen tab.
+    // Sending ~10-15 KB per flush (vs ~2 KB before) reduces the number of TCP
+    // round-trips from ~70 to ~12, eliminating the delayed-ACK stall that caused
+    // the 60-second page load.  WS/MQTT are paused so iRAM headroom is adequate.
     static String html;
     static bool html_reserved = false;
     if (!html_reserved) {
-        html.reserve(8192); // small working buffer, flushed per section
+        html.reserve(16384); // one screen's HTML fits comfortably; cleared after each flush
         html_reserved = true;
     }
     html.clear();
-    // flushHtml: send whatever is currently in html to the client, then clear it.
-    // delay(1) yields to the lwIP/WiFi task so it can process ACKs and free
-    // TCP PBUFs before we queue the next section.
+    // flushHtml: send current buffer to the client and clear it.
     auto flushHtml = [&]() {
         if (html.length() > 0) {
             esp_task_wdt_reset();
@@ -885,7 +894,7 @@ void handle_gauges_page() {
     html += STYLE;
     html += "<title>Gauge Calibration</title></head><body><div class='container'>";
     flushHtml(); // flush header + styles before body content
-    Serial.println("[GAUGES] style flushed, building body");
+    Serial.printf("[GAUGES] style flushed, building body t=%lu\n", millis());
     extern bool test_mode;
     html += "<h2>Gauge Calibration</h2>";
     html += "<form method='POST' action='/toggle-test-mode' style='margin-bottom:16px;text-align:center;'>";
@@ -913,11 +922,11 @@ void handle_gauges_page() {
             html += "<button type='button' class='tab-btn' id='tabbtn_" + String(s) + "' onclick='(function(){ showScreenTab(" + String(s) + "); fetch(\"/set-screen?screen=" + String(screen_one_based) + "\", {method:\"GET\"}).catch(function(){ }); })()' style='margin:0 4px; padding:8px 16px; font-size:1em;'>Screen " + String(screen_one_based) + "</button>";
         }
     html += "</div>";
-    flushHtml(); // flush tab bar before heavy per-screen content
-    Serial.println("[GAUGES] tab bar flushed, starting per-screen loop");
+    flushHtml(); // flush tab bar before per-screen content
+    Serial.printf("[GAUGES] tab bar flushed, starting per-screen loop t=%lu\n", millis());
     // Tab content
     for (int s = 0; s < NUM_SCREENS; ++s) {
-        Serial.printf("[GAUGES] building screen %d\n", s);
+        Serial.printf("[GAUGES] building screen %d t=%lu\n", s, millis());
         html += "<div class='tab-content' id='tabcontent_" + String(s) + "' style='display:" + (s==0?"block":"none") + ";'>";
         html += "<h3>Screen " + String(s+1) + "</h3>";
         
@@ -1020,8 +1029,6 @@ void handle_gauges_page() {
         html += "</div>"; // End alarm box
         
         html += "</div>"; // End number display config
-        flushHtml();
-        Serial.printf("[GAUGES] screen %d number config flushed\n", s);
 
         // Compass display configuration container
         bool isMag = (String(screen_configs[s].number_path) == "navigation.headingMagnetic" ||
@@ -1064,7 +1071,6 @@ void handle_gauges_page() {
         html += "</div>";
         html += "</div>"; // end row
         html += "</div>"; // End compass config
-        flushHtml();
 
         // Dual display configuration container (shown when display_type is Dual)
         html += "<div id='dualconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == 2 ? "block" : "none") + ";'>";
@@ -1147,8 +1153,7 @@ void handle_gauges_page() {
         html += "</div>"; // End bottom alarm box
 
         html += "</div>"; // End dual display config
-        flushHtml();
-        
+
         // Quad display configuration (hidden when display_type is not Quad)
         html += "<div id='quadconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == 3 ? "block" : "none") + ";'>";
         html += "<h4>Quad Display Settings</h4>";
@@ -1189,16 +1194,11 @@ void handle_gauges_page() {
         };
 
         addQuadrantHTML("tl", "Top-Left",     screen_configs[s].quad_tl_path, screen_configs[s].quad_tl_font_size, screen_configs[s].quad_tl_font_color, 0, 1, 2);
-        flushHtml();
         addQuadrantHTML("tr", "Top-Right",    screen_configs[s].quad_tr_path, screen_configs[s].quad_tr_font_size, screen_configs[s].quad_tr_font_color, 0, 3, 4);
-        flushHtml();
         addQuadrantHTML("bl", "Bottom-Left",  screen_configs[s].quad_bl_path, screen_configs[s].quad_bl_font_size, screen_configs[s].quad_bl_font_color, 1, 1, 2);
-        flushHtml();
         addQuadrantHTML("br", "Bottom-Right", screen_configs[s].quad_br_path, screen_configs[s].quad_br_font_size, screen_configs[s].quad_br_font_color, 1, 3, 4);
-        flushHtml();
 
         html += "</div>"; // End quad display config
-        flushHtml();
         
         // Gauge configuration container (hidden when display_type is Number)
         html += "<div id='gaugeconfig_" + String(s) + "' style='display:" + String((screen_configs[s].display_type == 0 || screen_configs[s].display_type == 4) ? "block" : "none") + ";'>";
@@ -1291,10 +1291,8 @@ void handle_gauges_page() {
             html += "</div>";
 
             html += "</div>"; // close icon-section
-            flushHtml(); // flush after each gauge (~3KB each)
         }
         html += "</div>"; // close gaugeconfig div
-        flushHtml();
         
         // Gauge + Number configuration (display_type == 4)
         html += "<div id='gaugenumconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == 4 ? "block" : "none") + ";'>";
@@ -1338,7 +1336,6 @@ void handle_gauges_page() {
         html += "</div>"; // End alarm box
 
         html += "</div>"; // close gaugenumconfig div
-        flushHtml();
         
         // Graph configuration (display_type == 5)
         html += "<div id='graphconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == 5 ? "block" : "none") + ";'>";
@@ -1427,13 +1424,17 @@ void handle_gauges_page() {
         html += "</div>"; // close positionconfig div
 
         html += "</div>"; // close tab content
-        flushHtml(); // flush after each screen tab to keep memory usage low
+        // Split timing: distinguish HTML build time vs TCP send time
+        Serial.printf("[GAUGES] screen %d built len=%u t=%lu\n", s, html.length(), millis());
+        flushHtml();
+        Serial.printf("[GAUGES] screen %d sent t=%lu iRAM=%u\n", s, millis(),
+                      heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     }
     // Tab JS and Apply button (ensure inside form)
     html += "<div style='text-align:center; margin-top:16px;'><input type='button' id='saveBtn' value='Apply (no reboot)' onclick='ajaxSave()' style='padding:10px 24px; font-size:1.1em;'></div>";
     html += "</form>";
     // Now add the test buttons outside the main form
-    // Flush per-screen to stay within ~4KB chunks — 50 forms × ~350 chars ≈ 17KB total.
+    // 50 forms × ~350 chars ≈ 17KB — accumulated into one flush before the JS block.
     for (int s = 0; s < NUM_SCREENS; ++s) {
         for (int g = 0; g < 2; ++g) {
             for (int p = 0; p < 5; ++p) {
@@ -1445,9 +1446,8 @@ void handle_gauges_page() {
                 html += "</form>";
             }
         }
-        flushHtml(); // flush after each screen's test forms (~10 forms at a time)
     }
-    flushHtml(); // flush before JavaScript block — JS alone can be 3-5KB
+    flushHtml(); // flush all test forms + apply button in one burst before JavaScript
     html += "<script>function testGaugePoint(screen,gauge,point){\n";
     html += "  var angleInput = document.querySelector('input[name=\"angle_'+screen+'_'+gauge+'_'+point+'\"]');\n";
     html += "  var testAngle = document.getElementById('testangle_'+screen+'_'+gauge+'_'+point);\n";
@@ -1663,8 +1663,8 @@ void handle_gauges_page() {
     flushHtml(); // flush final section
     esp_task_wdt_reset();
     config_server.sendContent(""); // chunked transfer terminator (zero-length chunk)
-    Serial.printf("[GAUGES] stream complete, iRAM=%u\n",
-        heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    Serial.printf("[GAUGES] stream complete t=%lu iRAM=%u\n",
+        millis(), heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     Serial.flush();
     // NOTE: do NOT call rst_close_client() here — we are still inside handleClient().
     // Closing the socket inside the handler causes handleClient() to crash on cleanup.
@@ -1673,6 +1673,7 @@ void handle_gauges_page() {
     // Clear the watchdog timestamp so it doesn't double-fire.
     g_config_page_last_seen = 0;
     resume_signalk_ws();
+    resume_mqtt();
 }
 
 void handle_save_gauges() {
@@ -2043,13 +2044,10 @@ void handle_save_gauges() {
         // Attempt to write per-screen binary configs to SD immediately so toggles
         // (like show_bottom) persist even if NVS writes fail or are delayed.
         //
-        // iRAM strategy: pause_signalk_ws() disconnects the WS (freeing ~22 KB WS
-        // receive buffer) before every SD write block. This is called here in the
-        // save handler — not just in handle_gauges_page() — because the WS reconnects
-        // seconds after each save so subsequent saves arrive with iRAM already low.
-        // Pausing here guarantees ~22 KB headroom for SDMMC DMA on every save.
-        // A short yield after the pause lets lwIP free any remaining TCP buffers.
+        // Pause data source on every save to free Core 0 bandwidth and iRAM for
+        // SD DMA writes. Reconnects after apply_all_screen_visuals() in the main loop.
         pause_signalk_ws();
+        pause_mqtt();
         {
             const size_t IRAM_MIN_FOR_SD = 20 * 1024;
             size_t iram_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
@@ -2132,6 +2130,7 @@ void handle_save_gauges() {
         // dropping iRAM to ~15KB which causes sdmmc_read_blocks (257) failures and a crash.
         // The main loop calls resume_signalk_ws() after the visual rebuild completes.
         schedule_signalk_ws_resume();
+        resume_mqtt();
         // Note: fetch_all_metadata() intentionally NOT called here — it makes blocking
         // HTTP requests (up to 1.5s each × many paths) which causes WDT on Core 1.
         // Metadata is fetched automatically on WS connect (wsEvent WStype_CONNECTED).

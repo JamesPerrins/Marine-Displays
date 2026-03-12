@@ -31,6 +31,7 @@ static PubSubClient  s_mqtt_client(s_wifi_client);
 static TaskHandle_t  s_mqtt_task_handle = NULL;
 static volatile bool s_mqtt_enabled     = false;
 static volatile bool s_mqtt_connected   = false;
+static volatile bool s_mqtt_paused      = false;
 
 // ── Extract systemId from topic prefix ────────────────────────────────────
 // Prefix format: "N/signalk/<systemId>/vessels/self"
@@ -196,6 +197,21 @@ static void mqtt_task(void* param) {
     while (s_mqtt_enabled) {
         esp_task_wdt_reset();  // keep WDT happy on Core 0
 
+        // Paused while config UI is open: disconnect and wait.
+        // Keep refreshing last_reconnect_attempt so that after unpause the task
+        // waits a full RECONNECT_INTERVAL before reconnecting — giving the HTTP
+        // chunked connection time to drain before we start new TCP activity.
+        if (s_mqtt_paused) {
+            if (s_mqtt_client.connected()) {
+                s_mqtt_client.disconnect();
+                s_mqtt_connected = false;
+                Serial.println("[MQTT] Paused for config UI");
+            }
+            last_reconnect_attempt = millis();
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+
         if (!WiFi.isConnected()) {
             s_mqtt_connected = false;
             vTaskDelay(pdMS_TO_TICKS(1000));
@@ -266,6 +282,21 @@ void enable_mqtt(const char* broker, uint16_t port,
         &s_mqtt_task_handle,
         0   // Core 0 (WiFi/network core)
     );
+}
+
+void pause_mqtt() {
+    if (!s_mqtt_enabled) return;
+    s_mqtt_paused = true;
+    // Give the task ~100ms to see the flag and disconnect
+    for (int i = 0; i < 4; i++) vTaskDelay(pdMS_TO_TICKS(25));
+    Serial.printf("[MQTT] Paused, iRAM=%u\n",
+                  heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+}
+
+void resume_mqtt() {
+    if (!s_mqtt_enabled) return;
+    s_mqtt_paused = false;
+    Serial.println("[MQTT] Resumed");
 }
 
 void disable_mqtt() {

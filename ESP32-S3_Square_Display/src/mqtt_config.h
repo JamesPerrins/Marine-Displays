@@ -18,6 +18,12 @@ void enable_mqtt(const char* broker, uint16_t port,
 // Stop the MQTT client task and disconnect.
 void disable_mqtt();
 
+// Temporarily disconnect while the config UI is open to free Core 0 bandwidth.
+// Safe to call when MQTT is not enabled (no-op).
+void pause_mqtt();
+// Allow MQTT to reconnect after config save.
+void resume_mqtt();
+
 // Returns true if the MQTT task is running.
 bool is_mqtt_enabled();
 

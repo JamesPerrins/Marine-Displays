@@ -839,9 +839,10 @@ void load_preferences() {
 // Emits the INNER content of one screen's tab div (no outer wrapper).
 // Called both from handle_gauges_page() (screen 0, inline) and from
 // handle_gauges_screen() (screens 1-4, via AJAX fetch).
+template<typename FlushFn>
 static void append_screen_tab_content(int s, String& html,
         const std::vector<String>& iconFiles,
-        const std::vector<String>& bgFiles) {
+        const std::vector<String>& bgFiles, FlushFn& flush) {
     extern bool test_mode;
     html += "<h3>Screen " + String(s+1) + "</h3>";
 
@@ -898,6 +899,7 @@ static void append_screen_tab_content(int s, String& html,
         screen_configs[s].display_type == DISPLAY_TYPE_GAUGE_NUMBER) html += " hidden disabled";
     html += ">Custom Color</option>";
     html += "</select></label></div>";
+    flush(); // ~2KB: display type + background dropdowns sent
 
     // Number display configuration container
     html += "<div id='numberconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == 1 ? "block" : "none") + ";'>";
@@ -1044,6 +1046,7 @@ static void append_screen_tab_content(int s, String& html,
     html += "> Enable</label></div>";
     html += "</div>"; // End bottom alarm box
     html += "</div>"; // End dual display config
+    flush(); // ~5KB: number + compass + dual config sections sent
 
     // Quad display configuration
     html += "<div id='quadconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == 3 ? "block" : "none") + ";'>";
@@ -1084,6 +1087,7 @@ static void append_screen_tab_content(int s, String& html,
     addQuadrantHTML("bl", "Bottom-Left",  screen_configs[s].quad_bl_path, screen_configs[s].quad_bl_font_size, screen_configs[s].quad_bl_font_color, 1, 1, 2);
     addQuadrantHTML("br", "Bottom-Right", screen_configs[s].quad_br_path, screen_configs[s].quad_br_font_size, screen_configs[s].quad_br_font_color, 1, 3, 4);
     html += "</div>"; // End quad display config
+    flush(); // ~3KB: quad config sent
 
     // Gauge configuration container
     html += "<div id='gaugeconfig_" + String(s) + "' style='display:" + String((screen_configs[s].display_type == 0 || screen_configs[s].display_type == 4) ? "block" : "none") + ";'>";
@@ -1165,6 +1169,7 @@ static void append_screen_tab_content(int s, String& html,
         html += "</div>"; // close icon-section
     }
     html += "</div>"; // close gaugeconfig div
+    flush(); // ~5KB: gauge calibration tables + icon dropdowns sent
 
     // Gauge + Number configuration
     html += "<div id='gaugenumconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == 4 ? "block" : "none") + ";'>";
@@ -1376,8 +1381,8 @@ void handle_gauges_page() {
     // Tab content — screen 0 inline, screens 1+ loaded on demand via AJAX
     Serial.printf("[GAUGES] building screen 0 t=%lu\n", millis());
     html += "<div class='tab-content' id='tabcontent_0' style='display:block;'>";
-    // Screen 0: full inline content
-    append_screen_tab_content(0, html, iconFiles, bgFiles);
+    // Screen 0: full inline content, flushed in sections via the callback
+    append_screen_tab_content(0, html, iconFiles, bgFiles, flushHtml);
     html += "</div>"; // close tab-content div for screen 0
     flushHtml();
     Serial.printf("[GAUGES] screen 0 sent t=%lu iRAM=%u\n", millis(), heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
@@ -1435,6 +1440,7 @@ void handle_gauges_page() {
     html += "  var hidden2=document.getElementById('active_tab_toggle');if(hidden2)hidden2.value=idx;\n";
     html += "  try{history.replaceState&&history.replaceState(null,null,'#tab'+idx);}catch(e){}\n";
     html += "}\n";
+    flushHtml(); // ~3KB: navigation JS (showScreenTab, _showTabNow) sent before large toggleGaugeConfig
     html += "function toggleGaugeConfig(screen){\n";
     html += "  var sel = document.getElementById('displaytype_'+screen);\n";
     html += "  var gaugeDiv = document.getElementById('gaugeconfig_'+screen);\n";
@@ -1684,7 +1690,8 @@ void handle_gauges_screen() {
         }
     };
     // Emit inner content (no outer wrapper — JS sets tabDiv.innerHTML directly)
-    append_screen_tab_content(s, html_gs, iconFiles, bgFiles);
+    // flushHtml passed as callback so large sections are streamed progressively
+    append_screen_tab_content(s, html_gs, iconFiles, bgFiles, flushHtml);
     html_gs += "<!--TESTFORMS-->";
     append_screen_test_forms(s, html_gs);
     flushHtml();

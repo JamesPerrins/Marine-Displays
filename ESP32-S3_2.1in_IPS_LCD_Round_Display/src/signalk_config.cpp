@@ -76,6 +76,12 @@ static String ws_extra_headers;
 // the server's full-state broadcast from filling memory with unsubscribed paths.
 static std::vector<String> s_subscribed_paths;
 
+// Timestamp (millis) of the most recent successful data update via update_signalk_value().
+// 0 = no data ever received.  Read from any task via get_last_data_update_ms().
+static volatile uint32_t s_last_any_update_ms = 0;
+
+uint32_t get_last_data_update_ms() { return s_last_any_update_ms; }
+
 // Connection health and reconnection/backoff state
 static unsigned long last_message_time = 0;
 static unsigned long last_reconnect_attempt = 0;
@@ -219,6 +225,7 @@ void update_signalk_value(const char* path, float value) {
     for (int i = 0; i < TOTAL_PARAMS; i++) {
         if (signalk_paths[i].length() > 0 && signalk_paths[i].equals(path)) {
             set_sensor_value(i, value);
+            s_last_any_update_ms = (uint32_t)millis();
         }
     }
 }

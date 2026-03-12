@@ -57,6 +57,16 @@ uint16_t get_signalk_server_port();
 String get_cf_client_id();
 String get_cf_client_secret();
 
+// Get configured data source ("signalk" or "mqtt")
+String get_data_source();
+
+// Get MQTT broker settings
+String   get_mqtt_broker();
+uint16_t get_mqtt_port();
+String   get_mqtt_user();
+String   get_mqtt_pass();
+String   get_mqtt_system_id();
+
 // Get/set configured Signal K path by index (0-9)
 String get_signalk_path_by_index(int index);
 void set_signalk_path_by_index(int index, const String& path);

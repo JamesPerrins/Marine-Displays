@@ -88,6 +88,10 @@ extern volatile bool g_signalk_ws_resume_pending;
 void refresh_signalk_subscriptions();
 // Fetch metadata for all configured paths (gauges, number, dual displays)
 void fetch_all_metadata();
+// Route an incoming path+value to the correct sensor slot(s).
+// Safe to call from any task/core; uses the sensor mutex internally.
+// Used by MQTT and any future data sources as a common update entry point.
+void update_signalk_value(const char* path, float value);
 
 // Enqueue an outgoing message to be sent when WS is connected
 void enqueue_signalk_message(const String &msg);

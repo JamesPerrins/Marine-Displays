@@ -798,6 +798,27 @@ void schedule_signalk_ws_resume() {
     Serial.println("[SK] WS resume deferred until after screen rebuild");
 }
 
+// Route an incoming path+value to the correct sensor slot(s).
+// Mirrors the routing logic in the WS TEXT handler so MQTT (and any other
+// source) can reuse the same sensor-value pipeline without duplicating code.
+void update_signalk_value(const char* path, float value) {
+    if (!path || path[0] == '\0') return;
+    bool found_in_gauge = false;
+    for (int i = 0; i < TOTAL_PARAMS; i++) {
+        if (signalk_paths[i].length() > 0 && signalk_paths[i].equals(path)) {
+            set_sensor_value(i, value);
+            found_in_gauge = true;
+        }
+    }
+    if (!found_in_gauge) {
+        // Store in extended map for number/dual/quad display types
+        if (sensor_mutex != NULL && xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(50))) {
+            extended_sensor_values[String(path)] = value;
+            xSemaphoreGive(sensor_mutex);
+        }
+    }
+}
+
 // Rebuild the subscription list from current configuration and (re)send it
 // over the active WebSocket connection if connected. If the WS is not
 // connected, the updated paths will be used when connection is (re)established.

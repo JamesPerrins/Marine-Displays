@@ -226,6 +226,14 @@ String saved_cf_client_id = "";
 String saved_cf_client_secret = "";
 // Hostname for the device (editable via Network Setup)
 String saved_hostname = "";
+// Data source selection: "signalk" or "mqtt"
+String saved_data_source = "signalk";
+// MQTT broker settings
+String saved_mqtt_broker    = "";
+uint16_t saved_mqtt_port    = 1883;
+String saved_mqtt_user      = "";
+String saved_mqtt_pass      = "";
+String saved_mqtt_system_id = "signalk";
 // 10 SignalK paths: [screen][gauge] => idx = s*2+g
 String signalk_paths[NUM_SCREENS * 2];
 // Auto-scroll interval in seconds (0 = off)
@@ -326,6 +334,13 @@ void save_preferences(bool skip_screen_blobs = false) {
         preferences.putUShort("signalk_port", saved_signalk_port);
         preferences.putString("cf_id", saved_cf_client_id);
         preferences.putString("cf_secret", saved_cf_client_secret);
+        // MQTT / data source settings
+        preferences.putString("data_source", saved_data_source);
+        preferences.putString("mqtt_broker", saved_mqtt_broker);
+        preferences.putUShort("mqtt_port", saved_mqtt_port);
+        preferences.putString("mqtt_user", saved_mqtt_user);
+        preferences.putString("mqtt_pass", saved_mqtt_pass);
+        preferences.putString("mqtt_sysid", saved_mqtt_system_id);
         // Persist device settings
         preferences.putUShort("buzzer_mode", (uint16_t)buzzer_mode);
         preferences.putUShort("buzzer_cooldown", buzzer_cooldown_sec);
@@ -531,6 +546,13 @@ void load_preferences() {
         saved_cf_client_id = preferences.getString("cf_id", "");
         saved_cf_client_secret = preferences.getString("cf_secret", "");
         saved_hostname = preferences.getString("hostname", "");
+        // MQTT / data source settings
+        saved_data_source    = preferences.getString("data_source", "signalk");
+        saved_mqtt_broker    = preferences.getString("mqtt_broker", "");
+        saved_mqtt_port      = preferences.getUShort("mqtt_port", 1883);
+        saved_mqtt_user      = preferences.getString("mqtt_user", "");
+        saved_mqtt_pass      = preferences.getString("mqtt_pass", "");
+        saved_mqtt_system_id = preferences.getString("mqtt_sysid", "signalk");
         // Load auto-scroll interval (seconds)
         auto_scroll_sec = preferences.getUShort("auto_scroll", 0);
         // Load device settings
@@ -2144,6 +2166,18 @@ void handle_network_page() {
     html += "<div class='form-row'><label>CF Access Client ID:</label><input name='cf_id' type='text' value='" + saved_cf_client_id + "'></div>";
     html += "<div class='form-row'><label>CF Access Secret:</label><input name='cf_secret' type='password' value='" + saved_cf_client_secret + "'></div>";
     html += "<div class='form-row'><label>ESP32 Hostname:</label><input name='hostname' type='text' value='" + saved_hostname + "'></div>";
+    html += "<hr style='margin:16px 0'>";
+    html += "<h3 style='color:#1f4f8b;margin-bottom:8px'>Data Source</h3>";
+    html += "<div class='form-row'><label>Source:</label><select name='data_source'>";
+    html += "<option value='signalk'" + String(saved_data_source == "signalk" ? " selected" : "") + ">SignalK (WebSocket)</option>";
+    html += "<option value='mqtt'" + String(saved_data_source == "mqtt" ? " selected" : "") + ">MQTT</option>";
+    html += "</select></div>";
+    html += "<h3 style='color:#1f4f8b;margin-bottom:8px'>MQTT Settings</h3>";
+    html += "<div class='form-row'><label>MQTT Broker:</label><input name='mqtt_broker' type='text' value='" + saved_mqtt_broker + "' placeholder='192.168.1.x or hostname'></div>";
+    html += "<div class='form-row'><label>MQTT Port:</label><input name='mqtt_port' type='number' value='" + String(saved_mqtt_port) + "'></div>";
+    html += "<div class='form-row'><label>MQTT Username:</label><input name='mqtt_user' type='text' value='" + saved_mqtt_user + "'></div>";
+    html += "<div class='form-row'><label>MQTT Password:</label><input name='mqtt_pass' type='password' value='" + saved_mqtt_pass + "'></div>";
+    html += "<div class='form-row'><label>MQTT System ID:</label><input name='mqtt_sysid' type='text' value='" + saved_mqtt_system_id + "' placeholder='signalk'></div>";
     html += "<div style='text-align:center;margin-top:12px;'><button class='tab-btn' type='submit' style='padding:10px 18px;'>Save & Reboot</button></div>";
     html += "</form>";
     html += "<p style='text-align:center; margin-top:10px;'><a href='/'>Back</a></p>";
@@ -2161,6 +2195,12 @@ void handle_save_wifi() {
         saved_cf_client_id = config_server.arg("cf_id");
         saved_cf_client_secret = config_server.arg("cf_secret");
         saved_hostname = config_server.arg("hostname");
+        if (config_server.hasArg("data_source")) saved_data_source = config_server.arg("data_source");
+        if (config_server.hasArg("mqtt_broker")) saved_mqtt_broker = config_server.arg("mqtt_broker");
+        if (config_server.hasArg("mqtt_port"))   saved_mqtt_port   = (uint16_t)config_server.arg("mqtt_port").toInt();
+        if (config_server.hasArg("mqtt_user"))   saved_mqtt_user   = config_server.arg("mqtt_user");
+        if (config_server.hasArg("mqtt_pass"))   saved_mqtt_pass   = config_server.arg("mqtt_pass");
+        if (config_server.hasArg("mqtt_sysid"))  saved_mqtt_system_id = config_server.arg("mqtt_sysid");
         save_preferences();
         Serial.println("[WiFi Config] SSID: " + saved_ssid);
         Serial.println("[WiFi Config] Password: " + saved_password);
@@ -2439,6 +2479,12 @@ String get_cf_client_secret() {
     return saved_cf_client_secret;
 }
 
+String get_data_source()    { return saved_data_source; }
+String get_mqtt_broker()    { return saved_mqtt_broker; }
+uint16_t get_mqtt_port()    { return saved_mqtt_port; }
+String get_mqtt_user()      { return saved_mqtt_user; }
+String get_mqtt_pass()      { return saved_mqtt_pass; }
+String get_mqtt_system_id() { return saved_mqtt_system_id; }
 
 String get_signalk_path_by_index(int idx) {
     if (idx >= 0 && idx < NUM_SCREENS * 2) return signalk_paths[idx];

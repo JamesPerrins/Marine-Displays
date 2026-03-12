@@ -439,6 +439,9 @@ void setup() {
     printf("Data source: %s\n", data_source.c_str());
 
     if (data_source == "mqtt") {
+        // Load configured paths so update_signalk_value() can match incoming MQTT topics.
+        // enable_signalk() normally does this, but is not called in MQTT mode.
+        load_signalk_paths();
         String broker = get_mqtt_broker();
         if (broker.length() > 0 && is_wifi_connected()) {
             printf("Starting MQTT — broker=%s port=%u prefix='%s'\n",

@@ -63,6 +63,9 @@ bool is_signalk_ws_paused();
 void resume_signalk_ws();
 // Rebuild and (re)send Signal K subscription list from current configuration
 void refresh_signalk_subscriptions();
+// Load configured paths into the internal path table used by update_signalk_value().
+// Must be called at startup when using MQTT (which doesn't call enable_signalk).
+void load_signalk_paths();
 // Route an incoming path+value to the correct sensor slot(s).
 // Safe to call from any task/core; used by MQTT as a common update entry point.
 void update_signalk_value(const char* path, float value);

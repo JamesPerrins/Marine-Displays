@@ -522,6 +522,15 @@ void resume_signalk_ws() {
     printf("[SK] WS resume requested\n");
 }
 
+// Sync configured paths into the local table used by update_signalk_value().
+// Called at startup for MQTT mode (which skips enable_signalk/refresh).
+void load_signalk_paths() {
+    for (int i = 0; i < TOTAL_PARAMS; i++) {
+        signalk_paths[i] = get_signalk_path_by_index(i);
+    }
+    printf("[SignalK] paths loaded for MQTT: '%s'\n", signalk_paths[0].c_str());
+}
+
 // Rebuild the subscription list from current configuration and (re)send it
 // over the active WebSocket connection if connected.
 void refresh_signalk_subscriptions() {

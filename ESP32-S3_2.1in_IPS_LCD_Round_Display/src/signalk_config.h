@@ -55,8 +55,17 @@ void init_sensor_mutex();
 // Signal K control functions
 void enable_signalk(const char* ssid, const char* password, const char* server_ip, uint16_t server_port);
 void disable_signalk();
+// Temporarily disconnect WS while config UI is open (frees WS receive buffer)
+void pause_signalk_ws();
+// Returns true if WS is currently paused
+bool is_signalk_ws_paused();
+// Resume WS connection after config save; reconnects automatically
+void resume_signalk_ws();
 // Rebuild and (re)send Signal K subscription list from current configuration
 void refresh_signalk_subscriptions();
+// Route an incoming path+value to the correct sensor slot(s).
+// Safe to call from any task/core; used by MQTT as a common update entry point.
+void update_signalk_value(const char* path, float value);
 
 // Enqueue an outgoing message to be sent when WS is connected
 void enqueue_signalk_message(const String &msg);

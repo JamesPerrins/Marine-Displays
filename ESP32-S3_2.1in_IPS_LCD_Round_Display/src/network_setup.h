@@ -38,6 +38,14 @@ String get_cf_client_secret();
 String get_signalk_path_by_index(int index);
 void set_signalk_path_by_index(int index, const String& path);
 
+// Data source and MQTT configuration getters
+String   get_data_source();
+String   get_mqtt_broker();
+uint16_t get_mqtt_port();
+String   get_mqtt_user();
+String   get_mqtt_pass();
+String   get_mqtt_topic_prefix();
+
 // Load persisted preferences and screen configs (from NVS or SD fallback)
 void load_preferences();
 

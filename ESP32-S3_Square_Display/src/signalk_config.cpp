@@ -462,7 +462,7 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
                 if (!first_conn) out += ",";
                 out += "{\"path\":\"";
                 out += p;
-                out += "\",\"period\":0}";
+                out += "\",\"period\":2000}";
                 first_conn = false;
             }
         }
@@ -822,7 +822,7 @@ void refresh_signalk_subscriptions() {
             if (!first) out += ",";
             out += "{\"path\":\"";
             out += path;
-            out += "\",\"period\":0}";
+            out += "\",\"period\":2000}";
             first = false;
         }
     }

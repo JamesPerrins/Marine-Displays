@@ -50,7 +50,7 @@ void gauge_config_init() {
     // Position 0 = top gauge, Position 1 = bottom gauge
     // IMPORTANT: Ensure we start in normal mode, not setup mode
     setup_mode = false;
-    Serial.println("Gauge config init: setup_mode = false (normal Signal K mode)");
+    printf("Gauge config init: setup_mode = false (normal Signal K mode)\n");
     // RPM Top (0-60 Hz) - Used on screens 1, 2  
     // IMPORTANT: 16.67 Hz should map to ~90° (quarter scale)
     current_config.calibrations[PARAM_RPM][0].values[0] = 0.0f;     // 0 Hz
@@ -63,7 +63,7 @@ void gauge_config_init() {
     current_config.calibrations[PARAM_RPM][0].angles[2] = 180;      // 180°
     current_config.calibrations[PARAM_RPM][0].angles[3] = 270;      // 270°
     current_config.calibrations[PARAM_RPM][0].angles[4] = 360;      // 360°
-    Serial.println("Initialized RPM calibration: 0-60 Hz -> 0-360°");
+    printf("Initialized RPM calibration: 0-60 Hz -> 0-360°\n");
     
     // RPM Bottom (unused but initialized)
     current_config.calibrations[PARAM_RPM][1] = current_config.calibrations[PARAM_RPM][0];
@@ -157,7 +157,7 @@ void gauge_config_init() {
     
     // Try to load from userdata partition (persists across firmware updates)
     // Load persisted calibration from Preferences (safe open/close here)
-    Serial.println("[gauge_config] Loading gauge calibration from storage...");
+    printf("[gauge_config] Loading gauge calibration from storage...\n");
     if (preferences.begin("settings", true)) {
         const char* param_names[] = {"rpm", "coolant", "fuel", "exhaust", "oil"};
         const char* pos_names[] = {"top", "bot"};
@@ -174,7 +174,7 @@ void gauge_config_init() {
         }
         preferences.end();
     } else {
-        Serial.println("[gauge_config] Preferences not available; using defaults.");
+        printf("[gauge_config] Preferences not available; using defaults.\n");
     }
     for (int i = 0; i < CALIBRATION_POINTS; i++) {
         char key[16];
@@ -190,7 +190,7 @@ void gauge_config_init() {
         snprintf(key, sizeof(key), "bot_ang_%d", i);
         current_config.bottom_angles[i] = preferences.getShort(key, current_config.bottom_angles[i]);
     }
-    Serial.println("[gauge_config] Gauge config loaded from flash (5-point calibration)");
+    printf("[gauge_config] Gauge config loaded from flash (5-point calibration)\n");
 }
 
 void gauge_config_load(GaugeConfig &config) {
@@ -200,7 +200,7 @@ void gauge_config_load(GaugeConfig &config) {
 void gauge_config_save(const GaugeConfig &config) {
     current_config = config;
     // Preferences must already be open! Only write if open.
-    Serial.println("[gauge_config] Saving gauge calibration to NVS...");
+    printf("[gauge_config] Saving gauge calibration to NVS...\n");
     const char* param_names[] = {"rpm", "coolant", "fuel", "exhaust", "oil"};
     const char* pos_names[] = {"top", "bot"};
     for (int p = 0; p < PARAM_TYPE_COUNT; p++) {
@@ -228,7 +228,7 @@ void gauge_config_save(const GaugeConfig &config) {
         snprintf(key, sizeof(key), "bot_ang_%d", i);
         preferences.putShort(key, config.bottom_angles[i]);
     }
-    Serial.println("[gauge_config] Gauge config saved to flash (5-point calibration)");
+    printf("[gauge_config] Gauge config saved to flash (5-point calibration)\n");
     // After saving calibration changes, refresh Signal K subscriptions so
     // any path changes or re-applies take effect immediately.
     refresh_signalk_subscriptions();

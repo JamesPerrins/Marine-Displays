@@ -142,7 +142,7 @@ static void ws_connect() {
         // Check DNS resolves before attempting SSL (fast failure diagnostic)
         IPAddress resolved;
         bool dns_ok = WiFi.hostByName(server_ip_str.c_str(), resolved);
-        Serial.printf("[SK] DNS: %s -> %s (%s)  iRAM=%u\n",
+        printf("[SK] DNS: %s -> %s (%s)  iRAM=%u\n",
             server_ip_str.c_str(), resolved.toString().c_str(),
             dns_ok ? "OK" : "FAIL",
             heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
@@ -152,10 +152,10 @@ static void ws_connect() {
         // Without this the server pushes ALL known paths on connect; our explicit
         // subscribe message then becomes the only active subscription.
         ws_client.beginSSL(server_ip_str.c_str(), server_port_num, "/signalk/v1/stream?subscribe=none");
-        Serial.println("Signal K: connecting via WSS (SSL)");
+        printf("Signal K: connecting via WSS (SSL)\n");
     } else {
         ws_client.begin(server_ip_str.c_str(), server_port_num, "/signalk/v1/stream?subscribe=none");
-        Serial.println("Signal K: connecting via WS (plain)");
+        printf("Signal K: connecting via WS (plain)\n");
     }
     ws_client.onEvent(wsEvent);
     ws_client.setReconnectInterval(0);  // disable library reconnect - we manage it ourselves
@@ -169,7 +169,7 @@ static void ws_connect() {
     if (cf_id.length() > 0 && cf_secret.length() > 0) {
         ws_extra_headers += "\r\nCF-Access-Client-Id: " + cf_id;
         ws_extra_headers += "\r\nCF-Access-Client-Secret: " + cf_secret;
-        Serial.println("Signal K: CF Access headers added");
+        printf("Signal K: CF Access headers added\n");
     }
     ws_client.setExtraHeaders(ws_extra_headers.c_str());
 }
@@ -226,7 +226,7 @@ void update_signalk_value(const char* path, float value) {
 // WebSocket event handler
 static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
     if (type == WStype_CONNECTED) {
-        Serial.printf("Signal K: WebSocket connected  iRAM=%u PSRAM=%u\n",
+        printf("Signal K: WebSocket connected  iRAM=%u PSRAM=%u\n",
             heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
             heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
         last_message_time = millis();
@@ -238,10 +238,10 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
         s_subscribed_paths.clear();
         String out = "{\"context\":\"vessels.self\",\"subscribe\":[";
         bool first_conn = true;
-        Serial.printf("[SK] Subscribing to %d paths:\n", TOTAL_PARAMS);
+        printf("[SK] Subscribing to %d paths:\n", TOTAL_PARAMS);
         for (int i = 0; i < TOTAL_PARAMS; i++) {
             if (signalk_paths[i].length() > 0) {
-                Serial.printf("[SK]   %s\n", signalk_paths[i].c_str());
+                printf("[SK]   %s\n", signalk_paths[i].c_str());
                 s_subscribed_paths.push_back(signalk_paths[i]);
                 if (!first_conn) out += ",";
                 out += "{\"path\":\"";
@@ -252,11 +252,13 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
         }
         out += "]}";
         if (first_conn) {
-            Serial.println("[SK WARN] No paths to subscribe — check gauge/screen config");
+            printf("[SK WARN] No paths to subscribe — check gauge/screen config\n");
         }
-        ws_client.sendTXT(out);
-        // flush any queued outgoing messages
-        flush_outgoing();
+        // Enqueue rather than calling sendTXT() directly from inside the wsEvent callback
+        // (which is called from ws_client.loop()). With SSL, writing from within a read
+        // callback can silently fail. flush_outgoing() in the task loop will send it
+        // on the very next iteration, once loop() has returned cleanly.
+        enqueue_outgoing(out);
         return;
     }
 
@@ -268,7 +270,7 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
         msg_count++;
         if (msg_count <= 5) {
             int preview = (length < 160) ? (int)length : 160;
-            Serial.printf("[SK MSG #%d len=%u] %.*s%s\n",
+            printf("[SK MSG #%d len=%u] %.*s%s\n",
                 msg_count, (unsigned)length, preview, (const char*)payload,
                 (length > 160 ? "..." : ""));
         }
@@ -278,14 +280,14 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
         unsigned long now_ms = millis();
         if (now_ms - last_mem_log >= 30000) {
             last_mem_log = now_ms;
-            Serial.printf("[SK MEM] iRAM=%u PSRAM=%u msg_len=%u total_msgs=%d\n",
+            printf("[SK MEM] iRAM=%u PSRAM=%u msg_len=%u total_msgs=%d\n",
                 heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                 heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
                 (unsigned)length, msg_count);
         }
         // Warn if iRAM drops below 15 KB — crash is likely imminent.
         if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL) < 15360) {
-            Serial.printf("[SK WARN] LOW iRAM=%u PSRAM=%u\n",
+            printf("[SK WARN] LOW iRAM=%u PSRAM=%u\n",
                 heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                 heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
         }
@@ -296,7 +298,7 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
         DynamicJsonDocument doc(8192);
         DeserializationError err = deserializeJson(doc, (const char*)payload, length);
         if (err) {
-            Serial.printf("[SIGNALK] JSON parse error: %s\n", err.c_str());
+            printf("[SIGNALK] JSON parse error: %s\n", err.c_str());
             return;
         }
 
@@ -314,21 +316,17 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
                     static int val_log_count = 0;
                     if (val_log_count < 20) {
                         val_log_count++;
-                        Serial.printf("[SK VAL] %s = %.4f\n", path, value);
+                        printf("[SK VAL] %s = %.4f\n", path, value);
                     }
 
-                    // Only update gauge slots for paths in our subscription list.
-                    // The server may send a full-state broadcast on connect; without
-                    // this filter every unsubscribed path would run through the loop.
-                    bool is_subscribed = false;
-                    for (const String& sp : s_subscribed_paths) {
-                        if (sp.equals(path)) { is_subscribed = true; break; }
-                    }
-                    if (is_subscribed) {
-                        for (int i = 0; i < TOTAL_PARAMS; i++) {
-                            if (signalk_paths[i].length() > 0 && signalk_paths[i].equals(path)) {
-                                set_sensor_value(i, value);
-                            }
+                    // Check path against all configured gauge slots and update.
+                    // No s_subscribed_paths filter here: the Round Display has no extended
+                    // sensor map, so unmatched paths simply don't update anything. This also
+                    // handles the case where refresh_signalk_subscriptions() resends the
+                    // subscription before s_subscribed_paths is refreshed via a reconnect.
+                    for (int i = 0; i < TOTAL_PARAMS; i++) {
+                        if (signalk_paths[i].length() > 0 && signalk_paths[i].equals(path)) {
+                            set_sensor_value(i, value);
                         }
                     }
                 }
@@ -340,12 +338,12 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
         last_message_time = millis();
     }
     if (type == WStype_DISCONNECTED) {
-        Serial.printf("[SK] Disconnected  iRAM=%u PSRAM=%u\n",
+        printf("[SK] Disconnected  iRAM=%u PSRAM=%u\n",
             heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
             heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     }
     if (type == WStype_ERROR) {
-        Serial.printf("[SK] WS error  iRAM=%u  detail=%.*s\n",
+        printf("[SK] WS error  iRAM=%u  detail=%.*s\n",
             heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
             (int)length, payload ? (char*)payload : "(none)");
     }
@@ -353,7 +351,7 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
 
 // FreeRTOS task for Signal K updates (runs on core 0)
 static void signalk_task(void *parameter) {
-    Serial.println("Signal K WebSocket task started");
+    printf("Signal K WebSocket task started\n");
     vTaskDelay(pdMS_TO_TICKS(500));
 
     while (signalk_enabled) {
@@ -364,13 +362,13 @@ static void signalk_task(void *parameter) {
             if (ws_client.isConnected()) {
                 ws_client.disconnect();
                 current_backoff_ms = RECONNECT_BASE_MS;
-                Serial.println("[SK] Config UI active - WS disconnected to free iRAM");
+                printf("[SK] Config UI active - WS disconnected to free iRAM\n");
             }
             if (g_signalk_ws_resume_when_ready) {
                 g_signalk_ws_resume_when_ready = false;
                 g_signalk_ws_paused = false;
                 next_reconnect_at = millis() + 1000;
-                Serial.println("[SK] WS unpaused, reconnecting in 1s");
+                printf("[SK] WS unpaused, reconnecting in 1s\n");
             }
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
@@ -393,7 +391,7 @@ static void signalk_task(void *parameter) {
         // detect silent drop: no messages/pongs for MESSAGE_TIMEOUT_MS
         if (ws_client.isConnected()) {
             if (now - last_message_time >= MESSAGE_TIMEOUT_MS) {
-                Serial.println("Signal K: connection idle timeout, forcing disconnect");
+                printf("Signal K: connection idle timeout, forcing disconnect\n");
                 ws_client.disconnect();
                 unsigned int jitter = (esp_random() & 0x7FF) % 1000;
                 next_reconnect_at = now + current_backoff_ms + jitter;
@@ -423,20 +421,20 @@ static void signalk_task(void *parameter) {
         static unsigned long last_hwm_log = 0;
         if (millis() - last_hwm_log >= 15000) {
             last_hwm_log = millis();
-            Serial.printf("[SK] Stack HWM: %u bytes free\n", uxTaskGetStackHighWaterMark(NULL));
+            printf("[SK] Stack HWM: %u bytes free\n", uxTaskGetStackHighWaterMark(NULL));
         }
 
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
-    Serial.println("Signal K WebSocket task ended");
+    printf("Signal K WebSocket task ended\n");
     vTaskDelete(NULL);
 }
 
 // Enable Signal K with WiFi credentials
 void enable_signalk(const char* ssid, const char* password, const char* server_ip, uint16_t server_port) {
     if (signalk_enabled) {
-        Serial.println("Signal K already enabled");
+        printf("Signal K already enabled\n");
         return;
     }
 
@@ -448,10 +446,10 @@ void enable_signalk(const char* ssid, const char* password, const char* server_i
     // Get all 10 paths from configuration
     for (int i = 0; i < TOTAL_PARAMS; i++) {
         signalk_paths[i] = get_signalk_path_by_index(i);
-        Serial.printf("=== ACTIVE Signal K path[%d] = '%s' ===\n", i, signalk_paths[i].c_str());
+        printf("=== ACTIVE Signal K path[%d] = '%s' ===\n", i, signalk_paths[i].c_str());
     }
 
-    Serial.println("=== Signal K paths loaded from configuration ===");
+    printf("=== Signal K paths loaded from configuration ===\n");
 
     // Initialize mutex first
     init_sensor_mutex();
@@ -460,11 +458,11 @@ void enable_signalk(const char* ssid, const char* password, const char* server_i
     }
 
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("Signal K: WiFi not connected, aborting");
+        printf("Signal K: WiFi not connected, aborting\n");
         signalk_enabled = false;
         return;
     }
-    Serial.println("Signal K: Starting WebSocket client...");
+    printf("Signal K: Starting WebSocket client...\n");
 
     ws_connect();
 
@@ -480,11 +478,10 @@ void enable_signalk(const char* ssid, const char* password, const char* server_i
         0
     );
     if (signalk_task_handle == NULL) {
-        Serial.println("[SK] Failed to create SignalK task - out of internal RAM");
+        printf("[SK] Failed to create SignalK task - out of internal RAM\n");
     }
 
-    Serial.println("Signal K WebSocket task created successfully");
-    Serial.flush();
+    printf("Signal K WebSocket task created successfully\n");
 }
 
 // Disable Signal K
@@ -495,7 +492,7 @@ void disable_signalk() {
         signalk_task_handle = NULL;
     }
     ws_client.disconnect();
-    Serial.println("Signal K disabled (WebSocket disconnected)");
+    printf("Signal K disabled (WebSocket disconnected)\n");
 }
 
 // Returns true if the WS is currently paused.
@@ -514,7 +511,7 @@ void pause_signalk_ws() {
         vTaskDelay(pdMS_TO_TICKS(50));
         esp_task_wdt_reset();
     }
-    Serial.printf("[SK] WS paused for config UI, iRAM now %u B\n",
+    printf("[SK] WS paused for config UI, iRAM now %u B\n",
                   heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 }
 
@@ -522,7 +519,7 @@ void pause_signalk_ws() {
 void resume_signalk_ws() {
     if (!signalk_enabled) return;
     g_signalk_ws_resume_when_ready = true;
-    Serial.println("[SK] WS resume requested");
+    printf("[SK] WS resume requested\n");
 }
 
 // Rebuild the subscription list from current configuration and (re)send it
@@ -531,7 +528,13 @@ void refresh_signalk_subscriptions() {
     // Reload signalk_paths from configuration
     for (int i = 0; i < TOTAL_PARAMS; i++) {
         signalk_paths[i] = get_signalk_path_by_index(i);
-        Serial.printf("[SignalK] refreshed path[%d] = '%s'\n", i, signalk_paths[i].c_str());
+        printf("[SignalK] refreshed path[%d] = '%s'\n", i, signalk_paths[i].c_str());
+    }
+    // Keep s_subscribed_paths in sync so the CONNECTED handler logging is accurate
+    // on the next reconnect, and so any future filter uses the latest paths.
+    s_subscribed_paths.clear();
+    for (int i = 0; i < TOTAL_PARAMS; i++) {
+        if (signalk_paths[i].length() > 0) s_subscribed_paths.push_back(signalk_paths[i]);
     }
 
     // Build subscription JSON manually to avoid DynamicJsonDocument allocating
@@ -556,8 +559,8 @@ void refresh_signalk_subscriptions() {
     // from two cores simultaneously is an unprotected race that crashes the device.
     // flush_outgoing() inside signalk_task will drain the queue safely from Core 0.
     if (enqueue_outgoing(out)) {
-        Serial.println("[SignalK] subscription payload queued");
+        printf("[SignalK] subscription payload queued\n");
     } else {
-        Serial.println("[SignalK] failed to queue subscription payload");
+        printf("[SignalK] failed to queue subscription payload\n");
     }
 }

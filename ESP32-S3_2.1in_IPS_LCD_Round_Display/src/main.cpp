@@ -374,35 +374,23 @@ void test_move_gauge(int screen, int gauge, int angle) {
 }
 
 void setup() {
-        // test_nvs_minimal() removed during cleanup
-    // Serial for debugging - with timeout
-    //Serial.setTxTimeoutMs(0);  // Non-blocking serial
-    Serial.begin(115200);
-    //delay(2000);  // USB CDC needs ~1-2s to enumerate on cold boot
-    
-    Serial.println("\n\n=== ESP32 Round Display Starting ===");
-    Serial.flush();
-    
+    printf("\n\n=== ESP32 Round Display Starting ===\n");
+
     // I2C and IO expander
     I2C_Init();
     delay(100);
     TCA9554PWR_Init(0x00);
     Set_EXIO(EXIO_PIN8, Low);    // Start with buzzer OFF
     Set_EXIO(EXIO_PIN3, High);   // CS deasserted (HIGH) before SPI init - prevents spurious SPI edges on cold boot
-    Serial.println("I2C and IO expander initialized");
-    Serial.flush();
-    
+    printf("I2C and IO expander initialized\n");
+
     // LCD (now with reduced pixel clock + larger bounce buffer)
     LCD_Init();
-    Serial.print("LCD initialized at ");
-    Serial.print(ESP_PANEL_LCD_RGB_TIMING_FREQ_HZ / 1000000);  // MHz
-    Serial.println("MHz pixel clock");
-    Serial.flush();
-    
+    printf("LCD initialized at %dMHz pixel clock\n", ESP_PANEL_LCD_RGB_TIMING_FREQ_HZ / 1000000);
+
     // SD Card (must be initialized before LVGL to load images)
     SD_Init();
-    Serial.println("SD card initialized");
-    Serial.flush();
+    printf("SD card initialized\n");
     
     // Load persisted preferences BEFORE initializing the UI so dynamic image paths
     // are available during screen construction.
@@ -416,83 +404,68 @@ void setup() {
 
     // Initialize RGB565 binary image decoder (fast loading, no PNG decode overhead)
     rgb565_decoder_init();
-    Serial.println("RGB565 decoder initialized");
-    Serial.flush();
+    printf("RGB565 decoder initialized\n");
 
     ui_init();  // Load SquareLine UI
-    Serial.println("LVGL and UI initialized");
-    Serial.flush();
-    
+    printf("LVGL and UI initialized\n");
+
     // Apply persisted needle styles (colors, widths, lengths, pivot)
     apply_all_needle_styles();
 
     // Initialize all needles to default positions
     initialize_needle_positions();
-    Serial.println("Needle positions initialized");
-    Serial.flush();
-    
+    printf("Needle positions initialized\n");
+
     // Initialize gauge configuration
     gauge_config_init();
-    Serial.println("Gauge configuration loaded");
-    Serial.flush();
+    printf("Gauge configuration loaded\n");
 
     // Setup auto-scroll timer if configured
     extern uint16_t auto_scroll_sec;
     if (auto_scroll_sec > 0) {
         set_auto_scroll_interval(auto_scroll_sec);
     }
-    
+
     // Initialize sensor mutex for thread-safe access
     init_sensor_mutex();
-    
+
     // Enable WiFi with optimizations
-    Serial.println("Starting WiFi setup...");
-    Serial.flush();
+    printf("Starting WiFi setup...\n");
     setup_network();
-    Serial.println("WiFi setup complete");
-    Serial.flush();
-    
+    printf("WiFi setup complete\n");
+
     // Start data source based on configured selection
     String data_source = get_data_source();
-    Serial.printf("Data source: %s\n", data_source.c_str());
-    Serial.flush();
+    printf("Data source: %s\n", data_source.c_str());
 
     if (data_source == "mqtt") {
         String broker = get_mqtt_broker();
         if (broker.length() > 0 && is_wifi_connected()) {
-            Serial.printf("Starting MQTT — broker=%s port=%u prefix='%s'\n",
-                          broker.c_str(), get_mqtt_port(), get_mqtt_topic_prefix().c_str());
-            Serial.flush();
+            printf("Starting MQTT — broker=%s port=%u prefix='%s'\n",
+                   broker.c_str(), get_mqtt_port(), get_mqtt_topic_prefix().c_str());
             enable_mqtt(broker.c_str(), get_mqtt_port(),
                         get_mqtt_user().c_str(), get_mqtt_pass().c_str(),
                         get_mqtt_topic_prefix().c_str());
         } else {
-            Serial.println("MQTT not started — broker not configured or WiFi not connected");
-            Serial.flush();
+            printf("MQTT not started — broker not configured or WiFi not connected\n");
         }
     } else {
         // Default: SignalK WebSocket
         String sk_ip = get_signalk_server_ip();
-        Serial.printf("Signal K Server IP: '%s'\n", sk_ip.c_str());
-        Serial.flush();
+        printf("Signal K Server IP: '%s'\n", sk_ip.c_str());
         if (sk_ip.length() > 0 && is_wifi_connected()) {
-            Serial.println("Starting Signal K...");
-            Serial.flush();
+            printf("Starting Signal K...\n");
             enable_signalk("", "", sk_ip.c_str(), get_signalk_server_port());
         } else {
-            Serial.println("Signal K not configured yet");
-            Serial.println("Connect to web UI to configure Signal K server");
-            Serial.flush();
+            printf("Signal K not configured yet\n");
+            printf("Connect to web UI to configure Signal K server\n");
         }
     }
-    
-    Serial.println("Display initialized with WiFi optimizations.");
-    Serial.print("WiFi SSID: ");
-    Serial.println(WiFi.SSID());
-    Serial.print("WiFi IP: ");
-    Serial.println(WiFi.localIP());
-    Serial.println("Navigate to http://esp32-rounddisplay.local or check your router for device IP");
-    Serial.flush();
+
+    printf("=== Setup complete ===\n");
+    printf("WiFi SSID: %s\n", WiFi.SSID().c_str());
+    printf("WiFi IP:   %s\n", WiFi.localIP().toString().c_str());
+    printf("Navigate to http://esp32-rounddisplay.local or check your router for device IP\n");
 }
 
 void loop() {
@@ -509,10 +482,7 @@ void loop() {
     if (gauge_is_setup_mode()) {
         int16_t top_angle = gauge_get_preview_top_angle();
         int16_t bottom_angle = gauge_get_preview_bottom_angle();
-        Serial.print("[DEBUG] Setup mode active. Preview angles: top=");
-        Serial.print(top_angle);
-        Serial.print(", bottom=");
-        Serial.println(bottom_angle);
+        printf("[DEBUG] Setup mode active. Preview angles: top=%d, bottom=%d\n", top_angle, bottom_angle);
         rotate_needle(top_angle);
         rotate_lower_needle(bottom_angle);
     } else if (use_demo_mode) {

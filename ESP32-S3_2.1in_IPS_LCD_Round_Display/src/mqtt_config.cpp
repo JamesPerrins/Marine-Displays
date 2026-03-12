@@ -74,7 +74,7 @@ static void mqtt_callback(char* topic, byte* payload, unsigned int length) {
     if (diag_count < 20) {
         diag_count++;
         int preview = (length < 40) ? (int)length : 40;
-        Serial.printf("[MQTT DIAG #%d] topic='%s' payload='%.*s'\n",
+        printf("[MQTT DIAG #%d] topic='%s' payload='%.*s'\n",
                       diag_count, topic, preview, (const char*)payload);
     }
 
@@ -133,11 +133,11 @@ static bool mqtt_connect() {
     }
 
     if (!ok) {
-        Serial.printf("[MQTT] Connect failed, state=%d\n", s_mqtt_client.state());
+        printf("[MQTT] Connect failed, state=%d\n", s_mqtt_client.state());
         return false;
     }
 
-    Serial.printf("[MQTT] Connected to %s:%u as %s\n",
+    printf("[MQTT] Connected to %s:%u as %s\n",
                   s_broker.c_str(), s_port, client_id.c_str());
 
     // Build subscription topic and prefix length
@@ -150,7 +150,7 @@ static bool mqtt_connect() {
         s_prefix_len = 0;
     }
     s_mqtt_client.subscribe(sub_topic.c_str());
-    Serial.printf("[MQTT] Subscribed to '%s' (prefix_len=%d)\n",
+    printf("[MQTT] Subscribed to '%s' (prefix_len=%d)\n",
                   sub_topic.c_str(), s_prefix_len);
 
     // Build keepalive topic and payload from prefix
@@ -168,12 +168,12 @@ static bool mqtt_connect() {
         }
         // Send immediately so bridge starts publishing right away
         s_mqtt_client.publish(s_keepalive_topic.c_str(), s_keepalive_payload.c_str());
-        Serial.printf("[MQTT] Keepalive → topic='%s' payload='%s'\n",
+        printf("[MQTT] Keepalive → topic='%s' payload='%s'\n",
                       s_keepalive_topic.c_str(), s_keepalive_payload.c_str());
     } else {
         // No systemId extractable (e.g. prefix is empty or plain)
         s_keepalive_topic = "";
-        Serial.println("[MQTT] No systemId in prefix — keepalive disabled");
+        printf("[MQTT] No systemId in prefix — keepalive disabled\n");
     }
 
     s_mqtt_connected = true;
@@ -205,7 +205,7 @@ static void mqtt_task(void* param) {
             if (s_mqtt_client.connected()) {
                 s_mqtt_client.disconnect();
                 s_mqtt_connected = false;
-                Serial.println("[MQTT] Paused for config UI");
+                printf("[MQTT] Paused for config UI\n");
             }
             last_reconnect_attempt = millis();
             vTaskDelay(pdMS_TO_TICKS(50));
@@ -263,14 +263,14 @@ void enable_mqtt(const char* broker, uint16_t port,
     s_topic_prefix = topic_prefix ? topic_prefix : "";
 
     if (s_broker.length() == 0) {
-        Serial.println("[MQTT] No broker configured, not starting");
+        printf("[MQTT] No broker configured, not starting\n");
         return;
     }
 
     s_mqtt_enabled   = true;
     s_mqtt_connected = false;
 
-    Serial.printf("[MQTT] Starting — broker=%s port=%u prefix='%s'\n",
+    printf("[MQTT] Starting — broker=%s port=%u prefix='%s'\n",
                   s_broker.c_str(), s_port, s_topic_prefix.c_str());
 
     xTaskCreatePinnedToCore(
@@ -289,14 +289,14 @@ void pause_mqtt() {
     s_mqtt_paused = true;
     // Give the task ~100ms to see the flag and disconnect
     for (int i = 0; i < 4; i++) vTaskDelay(pdMS_TO_TICKS(25));
-    Serial.printf("[MQTT] Paused, iRAM=%u\n",
+    printf("[MQTT] Paused, iRAM=%u\n",
                   heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 }
 
 void resume_mqtt() {
     if (!s_mqtt_enabled) return;
     s_mqtt_paused = false;
-    Serial.println("[MQTT] Resumed");
+    printf("[MQTT] Resumed\n");
 }
 
 void disable_mqtt() {
@@ -310,7 +310,7 @@ void disable_mqtt() {
         s_mqtt_task_handle = NULL;
     }
     s_mqtt_connected = false;
-    Serial.println("[MQTT] Disabled");
+    printf("[MQTT] Disabled\n");
 }
 
 bool is_mqtt_enabled()   { return s_mqtt_enabled; }

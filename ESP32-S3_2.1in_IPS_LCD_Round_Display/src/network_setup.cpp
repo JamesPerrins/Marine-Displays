@@ -29,7 +29,7 @@ extern "C" void show_fallback_error_screen_if_needed() {
         }
     }
     if (all_default) {
-        Serial.println("[ERROR] All screen configs are default/blank. Showing fallback error screen.");
+        printf("[ERROR] All screen configs are default/blank. Showing fallback error screen.\n");
         #ifdef LVGL_H
         lv_obj_t *scr = lv_scr_act();
         lv_obj_clean(scr);
@@ -189,10 +189,10 @@ extern "C" int ui_get_current_screen(void);
 extern "C" void ui_set_screen(int screen_num);
 
 void save_preferences() {
-    Serial.println("[DEBUG] Saving preferences...");
+    printf("[DEBUG] Saving preferences...\n");
     preferences.end();
     if (!preferences.begin(SETTINGS_NAMESPACE, false)) {
-        Serial.println("[ERROR] preferences.begin failed for settings namespace");
+        printf("[ERROR] preferences.begin failed for settings namespace\n");
     } else {
         preferences.putString("ssid", saved_ssid);
         preferences.putString("password", saved_password);
@@ -233,13 +233,13 @@ void save_preferences() {
             char key[32];
             snprintf(key, sizeof(key), "screen%d", s);
             esp_err_t err = nvs_set_blob(nvs_handle, key, &screen_configs[s], sizeof(ScreenConfig));
-            Serial.printf("[NVS SAVE] nvs_set_blob('%s', size=%u) -> %d\n", key, (unsigned)sizeof(ScreenConfig), err);
+            printf("[NVS SAVE] nvs_set_blob('%s', size=%u) -> %d\n", key, (unsigned)sizeof(ScreenConfig), err);
             if (err != ESP_OK) {
                 esp_err_t erase_err = nvs_erase_key(nvs_handle, key);
-                Serial.printf("[NVS SAVE] nvs_erase_key('%s') -> %d\n", key, erase_err);
+                printf("[NVS SAVE] nvs_erase_key('%s') -> %d\n", key, erase_err);
                 if (erase_err == ESP_OK) {
                     err = nvs_set_blob(nvs_handle, key, &screen_configs[s], sizeof(ScreenConfig));
-                    Serial.printf("[NVS SAVE] Retry nvs_set_blob('%s') -> %d\n", key, err);
+                    printf("[NVS SAVE] Retry nvs_set_blob('%s') -> %d\n", key, err);
                 }
             }
             if (err == ESP_OK) {
@@ -257,25 +257,25 @@ void save_preferences() {
                 snprintf(key, sizeof(key), "screen%d.part%d", s, part);
                 size_t part_sz = ((part + 1) * CHUNK_SIZE > total) ? (total - part * CHUNK_SIZE) : CHUNK_SIZE;
                 esp_err_t perr = nvs_set_blob(nvs_handle, key, ((uint8_t *)&screen_configs[s]) + part * CHUNK_SIZE, part_sz);
-                Serial.printf("[NVS SAVE] nvs_set_blob('%s', size=%u) -> %d\n", key, (unsigned)part_sz, perr);
+                printf("[NVS SAVE] nvs_set_blob('%s', size=%u) -> %d\n", key, (unsigned)part_sz, perr);
                 if (perr != ESP_OK) { parts_ok = false; break; }
             }
             if (parts_ok) {
                 any_nvs_ok = true;
-                Serial.printf("[NVS SAVE] Chunked write succeeded for screen%d (%d parts)\n", s, parts);
+                printf("[NVS SAVE] Chunked write succeeded for screen%d (%d parts)\n", s, parts);
             }
         }
         nvs_commit(nvs_handle);
         nvs_close(nvs_handle);
     } else {
-        Serial.printf("[ERROR] nvs_open failed: %d\n", nvs_err);
+        printf("[ERROR] nvs_open failed: %d\n", nvs_err);
     }
 
     // If we detected systematic NVS invalid-length errors, attempt a repair
     if (nvs_invalid_length_detected) {
         const char *repair_marker = "/config/.nvs_repaired";
         if (!SD_MMC.exists(repair_marker)) {
-            Serial.println("[NVS REPAIR] Detected invalid-length errors; attempting NVS repair (erase+init)");
+            printf("[NVS REPAIR] Detected invalid-length errors; attempting NVS repair (erase+init)\n");
             // Backup settings to SD
             if (!SD_MMC.exists("/config")) SD_MMC.mkdir("/config");
             File bst = SD_MMC.open("/config/nvs_backup_settings.txt", FILE_WRITE);
@@ -286,25 +286,25 @@ void save_preferences() {
                 bst.println(String(saved_signalk_port));
                 for (int i = 0; i < NUM_SCREENS * 2; ++i) bst.println(signalk_paths[i]);
                 bst.close();
-                Serial.println("[NVS REPAIR] Wrote /config/nvs_backup_settings.txt");
+                printf("[NVS REPAIR] Wrote /config/nvs_backup_settings.txt\n");
             } else {
-                Serial.println("[NVS REPAIR] Failed to write settings backup to SD");
+                printf("[NVS REPAIR] Failed to write settings backup to SD\n");
             }
             // Backup screen configs
             File bsf = SD_MMC.open("/config/nvs_backup_screens.bin", FILE_WRITE);
             if (bsf) {
                 bsf.write((const uint8_t *)screen_configs, sizeof(ScreenConfig) * NUM_SCREENS);
                 bsf.close();
-                Serial.println("[NVS REPAIR] Wrote /config/nvs_backup_screens.bin");
+                printf("[NVS REPAIR] Wrote /config/nvs_backup_screens.bin\n");
             } else {
-                Serial.println("[NVS REPAIR] Failed to write screens backup to SD");
+                printf("[NVS REPAIR] Failed to write screens backup to SD\n");
             }
 
             // Erase and re-init NVS
             esp_err_t erase_res = nvs_flash_erase();
-            Serial.printf("[NVS REPAIR] nvs_flash_erase() -> %d\n", erase_res);
+            printf("[NVS REPAIR] nvs_flash_erase() -> %d\n", erase_res);
             esp_err_t init_res = nvs_flash_init();
-            Serial.printf("[NVS REPAIR] nvs_flash_init() -> %d\n", init_res);
+            printf("[NVS REPAIR] nvs_flash_init() -> %d\n", init_res);
 
             // Retry writing Preferences and NVS blobs once
             if (init_res == ESP_OK) {
@@ -329,59 +329,59 @@ void save_preferences() {
                         char key[32];
                         snprintf(key, sizeof(key), "screen%d", s);
                         esp_err_t r2 = nvs_set_blob(nh2, key, &screen_configs[s], sizeof(ScreenConfig));
-                        Serial.printf("[NVS REPAIR] Retry nvs_set_blob('%s') -> %d\n", key, r2);
+                        printf("[NVS REPAIR] Retry nvs_set_blob('%s') -> %d\n", key, r2);
                         if (r2 == ESP_OK) any_ok2 = true;
                     }
                     nvs_commit(nh2);
                     nvs_close(nh2);
                     // create marker file so we don't repeat erase
                     File mf = SD_MMC.open(repair_marker, FILE_WRITE);
-                    if (mf) { mf.print("1"); mf.close(); Serial.println("[NVS REPAIR] Marker written"); }
+                    if (mf) { mf.print("1"); mf.close(); printf("[NVS REPAIR] Marker written\n"); }
                     if (any_ok2) {
-                        Serial.println("[NVS REPAIR] Repair appeared successful; proceeding");
+                        printf("[NVS REPAIR] Repair appeared successful; proceeding\n");
                     } else {
-                        Serial.println("[NVS REPAIR] Repair did not restore NVS blob writes");
+                        printf("[NVS REPAIR] Repair did not restore NVS blob writes\n");
                     }
                 } else {
-                    Serial.println("[NVS REPAIR] nvs_open failed after reinit");
+                    printf("[NVS REPAIR] nvs_open failed after reinit\n");
                 }
             }
         } else {
-            Serial.println("[NVS REPAIR] Repair marker present; skipping erase to avoid data loss");
+            printf("[NVS REPAIR] Repair marker present; skipping erase to avoid data loss\n");
         }
     }
 
     // Debug: print signalk_paths content before SD/NVS operations
-    Serial.println("[DEBUG] signalk_paths before saving:");
+    printf("[DEBUG] signalk_paths before saving:\n");
     for (int i = 0; i < NUM_SCREENS * 2; ++i) {
-        Serial.printf("[DEBUG] signalk_paths[%d] = '%s'\n", i, signalk_paths[i].c_str());
+        printf("[DEBUG] signalk_paths[%d] = '%s'\n", i, signalk_paths[i].c_str());
     }
 
     if (!any_nvs_ok) {
-        Serial.println("[SD SAVE] NVS blob writes failed; saving screen configs to SD as fallback...");
+        printf("[SD SAVE] NVS blob writes failed; saving screen configs to SD as fallback...\n");
         if (!SD_MMC.exists("/config")) SD_MMC.mkdir("/config");
         for (int s = 0; s < NUM_SCREENS; ++s) {
             char sdpath[64];
             snprintf(sdpath, sizeof(sdpath), "/config/screen%d.bin", s);
             File f = SD_MMC.open(sdpath, FILE_WRITE);
-            if (!f) { Serial.printf("[SD SAVE] Failed to open '%s'\n", sdpath); continue; }
+            if (!f) { printf("[SD SAVE] Failed to open '%s'\n", sdpath); continue; }
             size_t written = f.write((const uint8_t *)&screen_configs[s], sizeof(ScreenConfig));
             f.close();
-            Serial.printf("[SD SAVE] Wrote '%s' -> %u bytes\n", sdpath, (unsigned)written);
+            printf("[SD SAVE] Wrote '%s' -> %u bytes\n", sdpath, (unsigned)written);
         }
     }
 
     // Verify settings namespace saved correctly (read back keys)
     if (preferences.begin(SETTINGS_NAMESPACE, true)) {
-        Serial.println("[DEBUG] Verifying saved SignalK path keys in SETTINGS_NAMESPACE:");
+        printf("[DEBUG] Verifying saved SignalK path keys in SETTINGS_NAMESPACE:\n");
         for (int i = 0; i < NUM_SCREENS * 2; ++i) {
             String key = String("skpath_") + i;
             String v = preferences.getString(key.c_str(), "<missing>");
-            Serial.printf("[DEBUG] prefs[%s] = '%s'\n", key.c_str(), v.c_str());
+            printf("[DEBUG] prefs[%s] = '%s'\n", key.c_str(), v.c_str());
         }
         preferences.end();
     } else {
-        Serial.println("[DEBUG] preferences.begin(SETTINGS_NAMESPACE, true) failed for verification");
+        printf("[DEBUG] preferences.begin(SETTINGS_NAMESPACE, true) failed for verification\n");
     }
     // Also print saved SSID/password from Preferences to verify
     if (preferences.begin(SETTINGS_NAMESPACE, true)) {
@@ -394,13 +394,13 @@ void save_preferences() {
             spf.println(signalk_paths[i]);
         }
         spf.close();
-        Serial.println("[SD SAVE] Wrote /config/signalk_paths.txt");
+        printf("[SD SAVE] Wrote /config/signalk_paths.txt\n");
     } else {
-        Serial.println("[SD SAVE] Failed to open /config/signalk_paths.txt for writing");
+        printf("[SD SAVE] Failed to open /config/signalk_paths.txt for writing\n");
     }
         String vs = preferences.getString("ssid", "<missing>");
         String vp = preferences.getString("password", "<missing>");
-        Serial.printf("[DEBUG] prefs saved SSID='%s' PASSWORD='%s'\n", vs.c_str(), vp.c_str());
+        printf("[DEBUG] prefs saved SSID='%s' PASSWORD='%s'\n", vs.c_str(), vp.c_str());
         preferences.end();
     }
 }
@@ -435,7 +435,7 @@ void load_preferences() {
         // Apply brightness to hardware
         extern void Set_Backlight(uint8_t Light);
         Set_Backlight(LCD_Backlight);
-            Serial.printf("[DEVICE SAVE] buzzer_mode=%d buzzer_cooldown_sec=%u first_run_buzzer=%d\n", buzzer_mode, buzzer_cooldown_sec, (int)first_run_buzzer);
+            printf("[DEVICE SAVE] buzzer_mode=%d buzzer_cooldown_sec=%u first_run_buzzer=%d\n", buzzer_mode, buzzer_cooldown_sec, (int)first_run_buzzer);
         for (int i = 0; i < NUM_SCREENS * 2; ++i) {
             String key = String("skpath_") + i;
             signalk_paths[i] = preferences.getString(key.c_str(), "");
@@ -450,7 +450,7 @@ void load_preferences() {
         if (SD_MMC.exists(spfpath)) {
             File spf = SD_MMC.open(spfpath, FILE_READ);
             if (spf) {
-                Serial.println("[SD LOAD] Loading SignalK paths from /config/signalk_paths.txt");
+                printf("[SD LOAD] Loading SignalK paths from /config/signalk_paths.txt\n");
                 int idx = 0;
                 while (spf.available() && idx < NUM_SCREENS * 2) {
                     String line = spf.readStringUntil('\n');
@@ -461,7 +461,7 @@ void load_preferences() {
             }
         }
     }
-    Serial.printf("[DEBUG] Loaded settings: ssid='%s' password='%s' signalk_ip='%s' port=%u\n",
+    printf("[DEBUG] Loaded settings: ssid='%s' password='%s' signalk_ip='%s' port=%u\n",
                   saved_ssid.c_str(), saved_password.c_str(), saved_signalk_ip.c_str(), saved_signalk_port);
 
     // Initialize defaults
@@ -525,7 +525,7 @@ void load_preferences() {
                 File f = SD_MMC.open(sdpath, FILE_READ);
                 if (f) {
                     size_t got = f.read((uint8_t *)&screen_configs[s], sizeof(ScreenConfig));
-                    Serial.printf("[SD LOAD] Read '%s' -> %u bytes (expected %u)\n", sdpath, (unsigned)got, (unsigned)sizeof(ScreenConfig));
+                    printf("[SD LOAD] Read '%s' -> %u bytes (expected %u)\n", sdpath, (unsigned)got, (unsigned)sizeof(ScreenConfig));
                     f.close();
                     // Validate loaded config
                     bool valid = true;
@@ -537,23 +537,23 @@ void load_preferences() {
                         }
                     }
                     if (!valid) {
-                        Serial.printf("[CONFIG ERROR] SD config for screen %d invalid, restoring defaults\n", s);
+                        printf("[CONFIG ERROR] SD config for screen %d invalid, restoring defaults\n", s);
                         memset(&screen_configs[s], 0, sizeof(ScreenConfig));
                     } else {
                         restored_from_sd = true;
                     }
                 } else {
-                    Serial.printf("[SD LOAD] Failed to open '%s', restoring defaults for screen %d\n", sdpath, s);
+                    printf("[SD LOAD] Failed to open '%s', restoring defaults for screen %d\n", sdpath, s);
                     memset(&screen_configs[s], 0, sizeof(ScreenConfig));
                 }
             } else {
-                Serial.printf("[CONFIG ERROR] No SD config for screen %d, restoring defaults\n", s);
+                printf("[CONFIG ERROR] No SD config for screen %d, restoring defaults\n", s);
                 memset(&screen_configs[s], 0, sizeof(ScreenConfig));
             }
         }
     }
     if (restored_from_sd) {
-        Serial.println("[CONFIG RESTORE] Screen configs restored from SD after NVS was blank/default.");
+        printf("[CONFIG RESTORE] Screen configs restored from SD after NVS was blank/default.\n");
     }
 
     // Copy loaded calibration into gauge_cal for runtime use
@@ -591,7 +591,7 @@ void handle_gauges_page() {
             File file = root.openNextFile();
             while (file) {
                 String fname = file.name();
-                Serial.printf("[ASSET SCAN] Found file: %s\n", fname.c_str());
+                printf("[ASSET SCAN] Found file: %s\n", fname.c_str());
                 // Exclude macOS resource fork files (._ prefix)
                 if (fname.startsWith("._")) {
                     file = root.openNextFile();
@@ -925,9 +925,9 @@ void handle_save_gauges() {
             if (sf) {
                 size_t wrote = sf.write((const uint8_t *)&screen_configs[s2], sizeof(ScreenConfig));
                 sf.close();
-                Serial.printf("[SD SAVE] Immediate wrote '%s' -> %u bytes\n", sdpath, (unsigned)wrote);
+                printf("[SD SAVE] Immediate wrote '%s' -> %u bytes\n", sdpath, (unsigned)wrote);
             } else {
-                Serial.printf("[SD SAVE] Immediate failed to open '%s' for writing\n", sdpath);
+                printf("[SD SAVE] Immediate failed to open '%s' for writing\n", sdpath);
             }
         }
 
@@ -945,7 +945,7 @@ void handle_save_gauges() {
         if (applied_now) {
             skip_next_load_preferences = true;
         } else {
-            Serial.println("[HOTAPPLY] apply_all_screen_visuals() returned false — UI objects may not be present yet");
+            printf("[HOTAPPLY] apply_all_screen_visuals() returned false — UI objects may not be present yet\n");
             // still set skip flag so the page reflects in-memory state; we will not reboot
             skip_next_load_preferences = true;
         }
@@ -1088,12 +1088,11 @@ void handle_save_wifi() {
         if (config_server.hasArg("mqtt_pass")) saved_mqtt_pass = config_server.arg("mqtt_pass");
         if (config_server.hasArg("mqtt_prefix")) saved_mqtt_topic_prefix = config_server.arg("mqtt_prefix");
         save_preferences();
-        Serial.println("[WiFi Config] SSID: " + saved_ssid);
-        Serial.println("[WiFi Config] Password: " + saved_password);
-        Serial.println("[WiFi Config] SignalK IP: " + saved_signalk_ip);
-        Serial.print("[WiFi Config] SignalK Port: ");
-        Serial.println(saved_signalk_port);
-        Serial.println("[WiFi Config] Hostname: " + saved_hostname);
+        printf("[WiFi Config] SSID: %s\n", saved_ssid.c_str());
+        printf("[WiFi Config] Password: %s\n", saved_password.c_str());
+        printf("[WiFi Config] SignalK IP: %s\n", saved_signalk_ip.c_str());
+        printf("[WiFi Config] SignalK Port: %d\n", saved_signalk_port);
+        printf("[WiFi Config] Hostname: %s\n", saved_hostname.c_str());
         String html = "<html><head>";
         html += STYLE;
         html += "<title>Saved</title></head><body><div class='container'>";
@@ -1165,7 +1164,7 @@ void handle_save_device() {
         buzzer_mode = bm;
         buzzer_cooldown_sec = bcd;
         first_run_buzzer = true;
-        Serial.printf("[DEVICE SAVE_POST] buzzer_mode=%d buzzer_cooldown_sec=%u first_run_buzzer=%d auto_scroll=%u brightness=%u\n",
+        printf("[DEVICE SAVE_POST] buzzer_mode=%d buzzer_cooldown_sec=%u first_run_buzzer=%d auto_scroll=%u brightness=%u\n",
                   buzzer_mode, buzzer_cooldown_sec, (int)first_run_buzzer, (unsigned)auto_scroll_sec, (unsigned)LCD_Backlight);
 
         auto_scroll_sec = asc;
@@ -1274,11 +1273,10 @@ void handle_save_needles() {
 
 
 void setup_network() {
-    Serial.begin(115200);
-    delay(100);
-    Serial.printf("Flash size (ESP.getFlashChipSize()): %u bytes\n", ESP.getFlashChipSize());
+    // SD_MMC file operations during LVGL image loading can re-claim GPIO43 (UART0 TX).
+    printf("Flash size (ESP.getFlashChipSize()): %u bytes\n", ESP.getFlashChipSize());
     if (!SPIFFS.begin(true)) {
-        Serial.println("[ERROR] SPIFFS Mount Failed");
+        printf("[ERROR] SPIFFS Mount Failed\n");
     }
     // Note: Do not load preferences here; caller should load before UI init when required.
     // WiFi connect or AP fallback
@@ -1286,34 +1284,31 @@ void setup_network() {
     // If a hostname is configured, set it before connecting so DHCP uses it
     if (saved_hostname.length() > 0) {
         WiFi.setHostname(saved_hostname.c_str());
-        Serial.println("[WiFi] Hostname set to: " + saved_hostname);
+        printf("[WiFi] Hostname set to: %s\n", saved_hostname.c_str());
     }
     WiFi.begin(saved_ssid.c_str(), saved_password.c_str());
-    Serial.print("Connecting to WiFi");
+    printf("Connecting to WiFi");
     int tries = 0;
     while (WiFi.status() != WL_CONNECTED && tries < 30) {
         delay(500);
-        Serial.print(".");
+        printf(".");
         tries++;
     }
     if (WiFi.status() == WL_CONNECTED) {
-        Serial.println("\nWiFi connected!");
-        Serial.print("IP: ");
-        Serial.println(WiFi.localIP());
+        printf("\nWiFi connected!\nIP: %s\n", WiFi.localIP().toString().c_str());
         // Start mDNS responder so device can be reached by hostname.local
         if (saved_hostname.length() > 0) {
             if (MDNS.begin(saved_hostname.c_str())) {
-                Serial.println("[mDNS] Responder started for: " + saved_hostname + ".local");
+                printf("[mDNS] Responder started for: %s.local\n", saved_hostname.c_str());
             } else {
-                Serial.println("[mDNS] Failed to start mDNS responder");
+                printf("[mDNS] Failed to start mDNS responder\n");
             }
         }
     } else {
-        Serial.println("\nWiFi failed, starting AP mode");
+        printf("\nWiFi failed, starting AP mode\n");
         WiFi.mode(WIFI_AP);
         WiFi.softAP("ESP32-RoundDisplay", "12345678");
-        Serial.print("AP IP: ");
-        Serial.println(WiFi.softAPIP());
+        printf("AP IP: %s\n", WiFi.softAPIP().toString().c_str());
     }
     // Show fallback error screen if needed (after config load, before UI init)
     show_fallback_error_screen_if_needed();
@@ -1337,7 +1332,7 @@ void setup_network() {
     config_server.on("/set-screen", handle_set_screen);
     config_server.on("/nvs_test", HTTP_GET, handle_nvs_test);
     config_server.begin();
-    Serial.println("[WebServer] Configuration web UI started on port 80");
+    printf("[WebServer] Configuration web UI started on port 80\n");
 }
 
 bool is_wifi_connected() {
@@ -1414,25 +1409,25 @@ void handle_nvs_test() {
     nvs_handle_t nh;
     uint8_t blob[4] = { 0x12, 0x34, 0x56, 0x78 };
     err = nvs_open(PREF_NAMESPACE, NVS_READWRITE, &nh);
-    Serial.printf("[NVS TEST] nvs_open -> %s (%d)\n", esp_err_to_name(err), err);
+    printf("[NVS TEST] nvs_open -> %s (%d)\n", esp_err_to_name(err), err);
     resp += String("nvs_open: ") + (err == ESP_OK ? esp_err_to_name(err) : String(err)) + "\n";
     if (err == ESP_OK) {
         err = nvs_set_blob(nh, "test_blob", blob, sizeof(blob));
-        Serial.printf("[NVS TEST] nvs_set_blob -> %s (%d)\n", esp_err_to_name(err), err);
+        printf("[NVS TEST] nvs_set_blob -> %s (%d)\n", esp_err_to_name(err), err);
         resp += String("nvs_set_blob: ") + (err == ESP_OK ? esp_err_to_name(err) : String(err)) + "\n";
         err = nvs_commit(nh);
-        Serial.printf("[NVS TEST] nvs_commit -> %s (%d)\n", esp_err_to_name(err), err);
+        printf("[NVS TEST] nvs_commit -> %s (%d)\n", esp_err_to_name(err), err);
         resp += String("nvs_commit: ") + (err == ESP_OK ? esp_err_to_name(err) : String(err)) + "\n";
 
         uint8_t readbuf[4] = {0,0,0,0};
         size_t rsz = sizeof(readbuf);
         err = nvs_get_blob(nh, "test_blob", readbuf, &rsz);
-        Serial.printf("[NVS TEST] nvs_get_blob -> %s (%d) size=%u\n", esp_err_to_name(err), err, (unsigned)rsz);
+        printf("[NVS TEST] nvs_get_blob -> %s (%d) size=%u\n", esp_err_to_name(err), err, (unsigned)rsz);
         resp += String("nvs_get_blob: ") + (err == ESP_OK ? esp_err_to_name(err) : String(err)) + " size=" + String(rsz) + "\n";
         if (err == ESP_OK) {
             char bstr[64];
             snprintf(bstr, sizeof(bstr), "read: %02X %02X %02X %02X\n", readbuf[0], readbuf[1], readbuf[2], readbuf[3]);
-            Serial.printf("[NVS TEST] read bytes: %02X %02X %02X %02X\n", readbuf[0], readbuf[1], readbuf[2], readbuf[3]);
+            printf("[NVS TEST] read bytes: %02X %02X %02X %02X\n", readbuf[0], readbuf[1], readbuf[2], readbuf[3]);
             resp += String(bstr);
         }
         nvs_close(nh);
@@ -1490,11 +1485,11 @@ void handle_assets_upload() {
         int slash = filename.lastIndexOf('/');
         if (slash >= 0) filename = filename.substring(slash + 1);
         String path = String("/assets/") + filename;
-        Serial.printf("[ASSETS] Upload start: %s -> %s\n", upload.filename.c_str(), path.c_str());
+        printf("[ASSETS] Upload start: %s -> %s\n", upload.filename.c_str(), path.c_str());
         // open file for write (overwrite)
         assets_upload_file = SD_MMC.open(path, FILE_WRITE);
         if (!assets_upload_file) {
-            Serial.printf("[ASSETS] Failed to open %s for writing\n", path.c_str());
+            printf("[ASSETS] Failed to open %s for writing\n", path.c_str());
         }
     } else if (upload.status == UPLOAD_FILE_WRITE) {
         if (assets_upload_file) {
@@ -1503,7 +1498,7 @@ void handle_assets_upload() {
     } else if (upload.status == UPLOAD_FILE_END) {
         if (assets_upload_file) {
             assets_upload_file.close();
-            Serial.printf("[ASSETS] Upload finished: %s (%u bytes)\n", upload.filename.c_str(), (unsigned)upload.totalSize);
+            printf("[ASSETS] Upload finished: %s (%u bytes)\n", upload.filename.c_str(), (unsigned)upload.totalSize);
         }
     }
 }
@@ -1530,7 +1525,7 @@ void handle_assets_delete() {
     String path = String("/assets/") + fname;
     if (SD_MMC.exists(path)) {
         bool ok = SD_MMC.remove(path);
-        Serial.printf("[ASSETS] Delete %s -> %d\n", path.c_str(), ok);
+        printf("[ASSETS] Delete %s -> %d\n", path.c_str(), ok);
     }
     // redirect back
     config_server.sendHeader("Location", "/assets");

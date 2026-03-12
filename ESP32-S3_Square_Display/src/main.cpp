@@ -7,6 +7,7 @@ bool test_mode = false;
 #include "TCA9554PWR.h"
 #include "Display_ST7701.h"
 #include "LVGL_Driver.h"
+#include "Touch_GT911.h"
 #include "SD_Card.h"
 #include "ui.h"
 #include "ui_Settings.h"
@@ -1183,6 +1184,9 @@ void setup() {
     // Load persisted preferences BEFORE initializing the UI so dynamic image paths
     // are available during screen construction.
     load_preferences();
+
+    // Touch controller — must be before Lvgl_Init() which registers the touch callback
+    Touch_Init();
 
     // LVGL
     Lvgl_Init();

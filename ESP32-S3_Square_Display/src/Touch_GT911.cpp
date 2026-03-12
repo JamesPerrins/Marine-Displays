@@ -31,22 +31,43 @@ bool I2C_Write_Touch(uint8_t Driver_addr, uint16_t Reg_addr, const uint8_t *Reg_
   }
   if ( Wire.endTransmission(true))
   {
-    printf("The I2C transmission fails. - I2C Write\r\n");
+    //printf("The I2C transmission fails. - I2C Write\r\n");
     return false;
   }
   return true;
 }
 
+// Internal reset helper.
+// GT911 latches INT pin state when RSTN goes HIGH to select its I2C address:
+//   int_high=false → INT=LOW  → address 0x5D (v3 boards)
+//   int_high=true  → INT=HIGH → address 0x14 (v4 boards)
+static void gt911_reset_for_addr(bool int_high)
+{
+  pinMode(GT911_INT_PIN, OUTPUT);
+  digitalWrite(GT911_INT_PIN, int_high ? HIGH : LOW);
+
+  Set_EXIO(EXIO_PIN1, Low);           // assert RSTN
+  vTaskDelay(pdMS_TO_TICKS(10));
+  Set_EXIO(EXIO_PIN1, High);          // release RSTN — address latched ~100µs later
+  vTaskDelay(pdMS_TO_TICKS(55));      // GT911 boot time (55ms per datasheet)
+
+  // Release INT to input so the GT911 can drive it as an interrupt output
+  digitalWrite(GT911_INT_PIN, LOW);
+  vTaskDelay(pdMS_TO_TICKS(5));
+  pinMode(GT911_INT_PIN, INPUT);
+  vTaskDelay(pdMS_TO_TICKS(50));      // settle before I2C probe
+}
+
 uint8_t Touch_Init(void) {
-
-  GT911_Touch_Reset();
-
-  // Auto-detect GT911 I2C address (v3=0x5D, v4=0x14)
+  // Probe 0x5D first: reset with INT=LOW programs GT911 to 0x5D (v3 boards)
+  gt911_reset_for_addr(false);
   Wire.beginTransmission(GT911_ADDR_PRIMARY);
   if (Wire.endTransmission() == 0) {
     gt911_addr = GT911_ADDR_PRIMARY;
     printf("[TOUCH] GT911 found at 0x%02X (v3 board)\n", gt911_addr);
   } else {
+    // Not at 0x5D — reset with INT=HIGH to program GT911 to 0x14 (v4 boards)
+    gt911_reset_for_addr(true);
     Wire.beginTransmission(GT911_ADDR_SECONDARY);
     if (Wire.endTransmission() == 0) {
       gt911_addr = GT911_ADDR_SECONDARY;
@@ -59,24 +80,15 @@ uint8_t Touch_Init(void) {
 
   GT911_Read_cfg();
 
-  attachInterrupt(GT911_INT_PIN, Touch_GT911_ISR, interrupt); 
+  attachInterrupt(GT911_INT_PIN, Touch_GT911_ISR, interrupt);
 
   return true;
 }
-/* Reset controller */
+
+/* Reset controller — public API, programs GT911 to primary address 0x5D */
 uint8_t GT911_Touch_Reset(void)
 {
-  pinMode(GT911_INT_PIN, OUTPUT);                   
-  digitalWrite(GT911_INT_PIN, LOW);                  
-
-  Set_EXIO(EXIO_PIN1,Low);
-  vTaskDelay(pdMS_TO_TICKS(10));
-  Set_EXIO(EXIO_PIN1,High);
-  vTaskDelay(pdMS_TO_TICKS(200));
-
-  digitalWrite(GT911_INT_PIN, HIGH);                
-  pinMode(GT911_INT_PIN, INPUT);                     
-
+  gt911_reset_for_addr(false);
   return true;
 }
 void GT911_Read_cfg(void) {

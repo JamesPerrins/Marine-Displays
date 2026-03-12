@@ -1243,12 +1243,12 @@ void setup() {
     if (data_source == "mqtt") {
         String broker = get_mqtt_broker();
         if (broker.length() > 0 && is_wifi_connected()) {
-            Serial.printf("Starting MQTT — broker=%s port=%u systemId=%s\n",
-                          broker.c_str(), get_mqtt_port(), get_mqtt_system_id().c_str());
+            Serial.printf("Starting MQTT — broker=%s port=%u prefix='%s'\n",
+                          broker.c_str(), get_mqtt_port(), get_mqtt_topic_prefix().c_str());
             Serial.flush();
             enable_mqtt(broker.c_str(), get_mqtt_port(),
                         get_mqtt_user().c_str(), get_mqtt_pass().c_str(),
-                        get_mqtt_system_id().c_str());
+                        get_mqtt_topic_prefix().c_str());
         } else {
             Serial.println("MQTT not started — broker not configured or WiFi not connected");
             Serial.flush();

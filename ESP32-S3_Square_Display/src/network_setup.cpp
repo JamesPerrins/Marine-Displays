@@ -229,11 +229,13 @@ String saved_hostname = "";
 // Data source selection: "signalk" or "mqtt"
 String saved_data_source = "signalk";
 // MQTT broker settings
-String saved_mqtt_broker    = "";
-uint16_t saved_mqtt_port    = 1883;
-String saved_mqtt_user      = "";
-String saved_mqtt_pass      = "";
-String saved_mqtt_system_id = "signalk";
+String saved_mqtt_broker        = "";
+uint16_t saved_mqtt_port        = 1883;
+String saved_mqtt_user          = "";
+String saved_mqtt_pass          = "";
+// Topic prefix stripped before SK path matching, e.g. "vessels/self"
+// Leave blank to subscribe to all topics (#) for diagnosis.
+String saved_mqtt_topic_prefix  = "";
 // 10 SignalK paths: [screen][gauge] => idx = s*2+g
 String signalk_paths[NUM_SCREENS * 2];
 // Auto-scroll interval in seconds (0 = off)
@@ -340,7 +342,7 @@ void save_preferences(bool skip_screen_blobs = false) {
         preferences.putUShort("mqtt_port", saved_mqtt_port);
         preferences.putString("mqtt_user", saved_mqtt_user);
         preferences.putString("mqtt_pass", saved_mqtt_pass);
-        preferences.putString("mqtt_sysid", saved_mqtt_system_id);
+        preferences.putString("mqtt_prefix", saved_mqtt_topic_prefix);
         // Persist device settings
         preferences.putUShort("buzzer_mode", (uint16_t)buzzer_mode);
         preferences.putUShort("buzzer_cooldown", buzzer_cooldown_sec);
@@ -366,6 +368,13 @@ void save_preferences(bool skip_screen_blobs = false) {
             bak.println(saved_cf_client_id);
             bak.println(saved_cf_client_secret);
             bak.println(saved_hostname);
+            // Lines 8-13: MQTT / data-source settings (appended; old backups just won't have them)
+            bak.println(saved_data_source);
+            bak.println(saved_mqtt_broker);
+            bak.println(String(saved_mqtt_port));
+            bak.println(saved_mqtt_user);
+            bak.println(saved_mqtt_pass);
+            bak.println(saved_mqtt_topic_prefix);
             bak.close();
         }
     }
@@ -552,7 +561,7 @@ void load_preferences() {
         saved_mqtt_port      = preferences.getUShort("mqtt_port", 1883);
         saved_mqtt_user      = preferences.getString("mqtt_user", "");
         saved_mqtt_pass      = preferences.getString("mqtt_pass", "");
-        saved_mqtt_system_id = preferences.getString("mqtt_sysid", "signalk");
+        saved_mqtt_topic_prefix = preferences.getString("mqtt_prefix", "");
         // Load auto-scroll interval (seconds)
         auto_scroll_sec = preferences.getUShort("auto_scroll", 0);
         // Load device settings
@@ -574,20 +583,56 @@ void load_preferences() {
         }
         preferences.end();
     }
-    // If NVS lost WiFi credentials (e.g. after nvs_flash_erase), restore from SD backup.
-    if (saved_ssid.length() == 0 && SD_MMC.exists("/config/wifi_backup.txt")) {
+    // Restore from SD backup. Always read it so that:
+    //   (a) NVS-wiped devices recover WiFi credentials, AND
+    //   (b) New NVS keys (e.g. data_source, mqtt_*) that didn't exist in an
+    //       older firmware's NVS are filled in from the last saved backup.
+    if (SD_MMC.exists("/config/wifi_backup.txt")) {
         File bak = SD_MMC.open("/config/wifi_backup.txt", FILE_READ);
         if (bak) {
-            saved_ssid             = bak.readStringUntil('\n'); saved_ssid.trim();
-            saved_password         = bak.readStringUntil('\n'); saved_password.trim();
-            saved_signalk_ip       = bak.readStringUntil('\n'); saved_signalk_ip.trim();
-            String port_str        = bak.readStringUntil('\n'); port_str.trim();
-            saved_signalk_port     = (uint16_t)port_str.toInt();
-            saved_cf_client_id     = bak.readStringUntil('\n'); saved_cf_client_id.trim();
-            saved_cf_client_secret = bak.readStringUntil('\n'); saved_cf_client_secret.trim();
-            saved_hostname         = bak.readStringUntil('\n'); saved_hostname.trim();
+            // Lines 1-7: WiFi / SignalK credentials (always present)
+            String bak_ssid      = bak.readStringUntil('\n'); bak_ssid.trim();
+            String bak_pass      = bak.readStringUntil('\n'); bak_pass.trim();
+            String bak_sk_ip     = bak.readStringUntil('\n'); bak_sk_ip.trim();
+            String bak_sk_port   = bak.readStringUntil('\n'); bak_sk_port.trim();
+            String bak_cf_id     = bak.readStringUntil('\n'); bak_cf_id.trim();
+            String bak_cf_sec    = bak.readStringUntil('\n'); bak_cf_sec.trim();
+            String bak_hostname  = bak.readStringUntil('\n'); bak_hostname.trim();
+            // Lines 8-13: MQTT / data-source (only present in backups written by this firmware)
+            String bak_datasrc   = bak.readStringUntil('\n'); bak_datasrc.trim();
+            String bak_broker    = bak.readStringUntil('\n'); bak_broker.trim();
+            String bak_mport     = bak.readStringUntil('\n'); bak_mport.trim();
+            String bak_muser     = bak.readStringUntil('\n'); bak_muser.trim();
+            String bak_mpass     = bak.readStringUntil('\n'); bak_mpass.trim();
+            String bak_mprefix   = bak.readStringUntil('\n'); bak_mprefix.trim();
             bak.close();
-            Serial.println("[SD LOAD] WiFi credentials restored from /config/wifi_backup.txt");
+
+            // Restore WiFi credentials if NVS was wiped
+            if (saved_ssid.length() == 0 && bak_ssid.length() > 0) {
+                saved_ssid             = bak_ssid;
+                saved_password         = bak_pass;
+                saved_signalk_ip       = bak_sk_ip;
+                saved_signalk_port     = (uint16_t)bak_sk_port.toInt();
+                saved_cf_client_id     = bak_cf_id;
+                saved_cf_client_secret = bak_cf_sec;
+                saved_hostname         = bak_hostname;
+                Serial.println("[SD LOAD] WiFi credentials restored from /config/wifi_backup.txt");
+            }
+
+            // Always fill in MQTT settings from backup if NVS still has defaults.
+            // This handles reflash where new NVS keys were not yet present.
+            if (saved_data_source == "signalk" && bak_datasrc.length() > 0)
+                saved_data_source = bak_datasrc;
+            if (saved_mqtt_broker.length() == 0 && bak_broker.length() > 0)
+                saved_mqtt_broker = bak_broker;
+            if (saved_mqtt_port == 1883 && bak_mport.toInt() > 0)
+                saved_mqtt_port = (uint16_t)bak_mport.toInt();
+            if (saved_mqtt_user.length() == 0 && bak_muser.length() > 0)
+                saved_mqtt_user = bak_muser;
+            if (saved_mqtt_pass.length() == 0 && bak_mpass.length() > 0)
+                saved_mqtt_pass = bak_mpass;
+            if (saved_mqtt_topic_prefix.length() == 0 && bak_mprefix.length() > 0)
+                saved_mqtt_topic_prefix = bak_mprefix;
         }
     }
 
@@ -2177,7 +2222,7 @@ void handle_network_page() {
     html += "<div class='form-row'><label>MQTT Port:</label><input name='mqtt_port' type='number' value='" + String(saved_mqtt_port) + "'></div>";
     html += "<div class='form-row'><label>MQTT Username:</label><input name='mqtt_user' type='text' value='" + saved_mqtt_user + "'></div>";
     html += "<div class='form-row'><label>MQTT Password:</label><input name='mqtt_pass' type='password' value='" + saved_mqtt_pass + "'></div>";
-    html += "<div class='form-row'><label>MQTT System ID:</label><input name='mqtt_sysid' type='text' value='" + saved_mqtt_system_id + "' placeholder='signalk'></div>";
+    html += "<div class='form-row'><label>Topic Prefix:</label><input name='mqtt_prefix' type='text' value='" + saved_mqtt_topic_prefix + "' placeholder='empty = subscribe to all (#)'></div>";
     html += "<div style='text-align:center;margin-top:12px;'><button class='tab-btn' type='submit' style='padding:10px 18px;'>Save & Reboot</button></div>";
     html += "</form>";
     html += "<p style='text-align:center; margin-top:10px;'><a href='/'>Back</a></p>";
@@ -2200,7 +2245,7 @@ void handle_save_wifi() {
         if (config_server.hasArg("mqtt_port"))   saved_mqtt_port   = (uint16_t)config_server.arg("mqtt_port").toInt();
         if (config_server.hasArg("mqtt_user"))   saved_mqtt_user   = config_server.arg("mqtt_user");
         if (config_server.hasArg("mqtt_pass"))   saved_mqtt_pass   = config_server.arg("mqtt_pass");
-        if (config_server.hasArg("mqtt_sysid"))  saved_mqtt_system_id = config_server.arg("mqtt_sysid");
+        if (config_server.hasArg("mqtt_prefix"))  saved_mqtt_topic_prefix = config_server.arg("mqtt_prefix");
         save_preferences();
         Serial.println("[WiFi Config] SSID: " + saved_ssid);
         Serial.println("[WiFi Config] Password: " + saved_password);
@@ -2484,7 +2529,7 @@ String get_mqtt_broker()    { return saved_mqtt_broker; }
 uint16_t get_mqtt_port()    { return saved_mqtt_port; }
 String get_mqtt_user()      { return saved_mqtt_user; }
 String get_mqtt_pass()      { return saved_mqtt_pass; }
-String get_mqtt_system_id() { return saved_mqtt_system_id; }
+String get_mqtt_topic_prefix() { return saved_mqtt_topic_prefix; }
 
 String get_signalk_path_by_index(int idx) {
     if (idx >= 0 && idx < NUM_SCREENS * 2) return signalk_paths[idx];

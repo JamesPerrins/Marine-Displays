@@ -65,7 +65,9 @@ String   get_mqtt_broker();
 uint16_t get_mqtt_port();
 String   get_mqtt_user();
 String   get_mqtt_pass();
-String   get_mqtt_system_id();
+// Topic prefix stripped before SK path matching (e.g. "vessels/self")
+// Empty string = subscribe to all topics (#)
+String   get_mqtt_topic_prefix();
 
 // Get/set configured Signal K path by index (0-9)
 String get_signalk_path_by_index(int index);

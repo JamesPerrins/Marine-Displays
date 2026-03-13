@@ -92,6 +92,9 @@ void fetch_all_metadata();
 // Safe to call from any task/core; uses the sensor mutex internally.
 // Used by MQTT and any future data sources as a common update entry point.
 void update_signalk_value(const char* path, float value);
+// Returns millis() timestamp of last successful update_signalk_value() call.
+// 0 = no data received yet.
+uint32_t get_last_data_update_ms();
 
 // Enqueue an outgoing message to be sent when WS is connected
 void enqueue_signalk_message(const String &msg);

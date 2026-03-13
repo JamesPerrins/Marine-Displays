@@ -91,6 +91,12 @@ static String ws_extra_headers;
 // signalk_task clears both this and g_signalk_ws_paused when the threshold is met.
 static volatile bool g_signalk_ws_resume_when_ready = false;
 
+// Timestamp (millis) of the most recent successful data update via update_signalk_value().
+// 0 = no data ever received.  Read from any task via get_last_data_update_ms().
+static volatile uint32_t s_last_any_update_ms = 0;
+
+uint32_t get_last_data_update_ms() { return s_last_any_update_ms; }
+
 // Connection health and reconnection/backoff state
 static unsigned long last_message_time = 0;
 static unsigned long last_reconnect_attempt = 0;
@@ -563,6 +569,7 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
                     for (int i = 0; i < TOTAL_PARAMS; i++) {
                         if (signalk_paths[i].length() > 0 && signalk_paths[i].equals(path)) {
                             set_sensor_value(i, value);
+                            s_last_any_update_ms = (uint32_t)millis();
                             found_in_gauge = true;
                             // Don't break - continue to update ALL matching path indices
                         }
@@ -579,6 +586,7 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
                         }
                         if (is_subscribed && sensor_mutex != NULL && xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(50))) {
                             extended_sensor_values[String(path)] = value;
+                            s_last_any_update_ms = (uint32_t)millis();
                             xSemaphoreGive(sensor_mutex);
                         }
                     }
@@ -807,6 +815,7 @@ void update_signalk_value(const char* path, float value) {
     for (int i = 0; i < TOTAL_PARAMS; i++) {
         if (signalk_paths[i].length() > 0 && signalk_paths[i].equals(path)) {
             set_sensor_value(i, value);
+            s_last_any_update_ms = (uint32_t)millis();
             found_in_gauge = true;
         }
     }

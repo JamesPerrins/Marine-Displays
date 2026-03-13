@@ -2,6 +2,7 @@
 #include "ui.h"
 #include "screen_config_c_api.h"
 #include <Arduino.h>
+#include <esp_heap_caps.h>
 
 // Storage for graph display objects (one per screen)
 static lv_obj_t* graph_charts[NUM_SCREENS] = {NULL, NULL, NULL, NULL, NULL};
@@ -15,13 +16,7 @@ static lv_obj_t* bg_panels[NUM_SCREENS] = {NULL, NULL, NULL, NULL, NULL};
 static lv_obj_t* y_min_labels[NUM_SCREENS] = {NULL, NULL, NULL, NULL, NULL};
 static lv_obj_t* y_max_labels[NUM_SCREENS] = {NULL, NULL, NULL, NULL, NULL};
 
-// Auto-ranging tracking
-static float data_min[NUM_SCREENS] = {0, 0, 0, 0, 0};
-static float data_max[NUM_SCREENS] = {100, 100, 100, 100, 100};
-static int data_count[NUM_SCREENS] = {0, 0, 0, 0, 0};
-
-// Time-based sampling tracking
-static unsigned long last_sample_time[NUM_SCREENS] = {0, 0, 0, 0, 0};
+// Time-based sampling
 static unsigned long sample_intervals[6] = {
     100,    // 10s: sample every 100ms (100 points)
     100,    // 30s: sample every 100ms (300 points)
@@ -31,6 +26,68 @@ static unsigned long sample_intervals[6] = {
     6000    // 30m: sample every 6s (300 points)
 };
 static int point_counts[6] = {100, 300, 300, 300, 300, 300};
+
+// ── PSRAM-backed persistent graph data ──────────────────────────────
+#define MAX_GRAPH_POINTS 300
+
+typedef struct {
+    int32_t  series1[MAX_GRAPH_POINTS];
+    int32_t  series2[MAX_GRAPH_POINTS];
+    uint16_t write_index;        // next write position (ring buffer)
+    uint16_t count;              // total points written (capped at capacity)
+    uint16_t point_capacity;     // matches point_counts[time_range]
+    bool     has_series2;
+    unsigned long last_sample_time;
+} GraphDataBuffer;
+
+static GraphDataBuffer* graph_buffers[NUM_SCREENS] = {NULL, NULL, NULL, NULL, NULL};
+
+void graph_data_ensure_buffer(int screen_num) {
+    if (screen_num < 0 || screen_num >= NUM_SCREENS) return;
+    uint8_t tr = screen_configs[screen_num].graph_time_range;
+    if (tr > 5) tr = 0;
+    uint16_t capacity = (uint16_t)point_counts[tr];
+
+    GraphDataBuffer* buf = graph_buffers[screen_num];
+    if (buf) {
+        // If capacity changed (user changed time range), reset the buffer
+        if (buf->point_capacity != capacity) {
+            buf->write_index = 0;
+            buf->count = 0;
+            buf->point_capacity = capacity;
+            buf->last_sample_time = 0;
+        }
+        return; // already allocated
+    }
+    buf = (GraphDataBuffer*)heap_caps_calloc(1, sizeof(GraphDataBuffer), MALLOC_CAP_SPIRAM);
+    if (!buf) {
+        Serial.printf("[GRAPH] PSRAM alloc failed for screen %d\n", screen_num);
+        return;
+    }
+    buf->point_capacity = capacity;
+    buf->has_series2 = (strlen(screen_configs[screen_num].graph_path_2) > 0);
+    graph_buffers[screen_num] = buf;
+    Serial.printf("[GRAPH] PSRAM buffer allocated for screen %d (%u pts)\n", screen_num, capacity);
+}
+
+void graph_data_free(int screen_num) {
+    if (screen_num < 0 || screen_num >= NUM_SCREENS) return;
+    if (graph_buffers[screen_num]) {
+        heap_caps_free(graph_buffers[screen_num]);
+        graph_buffers[screen_num] = NULL;
+    }
+}
+
+// Store a data point into the PSRAM ring buffer (called regardless of chart visibility)
+static void graph_buffer_push(int screen_num, int32_t v1, int32_t v2, bool has_s2) {
+    GraphDataBuffer* buf = graph_buffers[screen_num];
+    if (!buf) return;
+    buf->series1[buf->write_index] = v1;
+    buf->series2[buf->write_index] = has_s2 ? v2 : 0;
+    buf->has_series2 = has_s2;
+    buf->write_index = (buf->write_index + 1) % buf->point_capacity;
+    if (buf->count < buf->point_capacity) buf->count++;
+}
 
 // Helper to convert hex color string to lv_color_t
 static lv_color_t hex_to_lv_color(const char* hex) {
@@ -62,8 +119,11 @@ void graph_display_create(int screen_num) {
     lv_obj_t* screen = get_screen_obj(screen_num);
     if (!screen) return;
     
-    // Clean up existing objects if they exist
+    // Clean up existing LVGL objects (PSRAM buffer is preserved)
     graph_display_destroy(screen_num);
+    
+    // Ensure PSRAM buffer exists for persistent data
+    graph_data_ensure_buffer(screen_num);
     
     // Hide gauge elements (needles and icons)
     lv_obj_t* top_needles[] = {ui_Needle, ui_Needle2, ui_Needle3, ui_Needle4, ui_Needle5};
@@ -142,9 +202,6 @@ void graph_display_create(int screen_num) {
     
     // Start with default range (will auto-adjust)
     lv_chart_set_range(graph_charts[screen_num], LV_CHART_AXIS_PRIMARY_Y, 0, 100);
-    data_min[screen_num] = 0;
-    data_max[screen_num] = 100;
-    data_count[screen_num] = 0;
     
     // Style the chart
     lv_obj_set_style_bg_color(graph_charts[screen_num], lv_color_black(), 0);
@@ -184,16 +241,56 @@ void graph_display_create(int screen_num) {
         lv_obj_set_style_line_width(graph_charts[screen_num], 0, LV_PART_ITEMS); // No connecting lines
     }
     
-    // Initialize all points to 0
-    for(int i = 0; i < points; i++) {
-        lv_chart_set_next_value(graph_charts[screen_num], graph_series[screen_num], 0);
-        if (has_series_2) {
-            lv_chart_set_next_value(graph_charts[screen_num], graph_series_2[screen_num], 0);
+    // Restore data from PSRAM buffer if available, otherwise initialize to 0
+    GraphDataBuffer* buf = graph_buffers[screen_num];
+    if (buf && buf->count > 0) {
+        // Replay buffered data in chronological order
+        int num_points = (buf->count < buf->point_capacity) ? buf->count : buf->point_capacity;
+        int start = (buf->count < buf->point_capacity) ? 0 : buf->write_index;
+        
+        // Fill leading zeros if buffer has fewer points than chart capacity
+        for (int i = 0; i < points - num_points; i++) {
+            lv_chart_set_next_value(graph_charts[screen_num], graph_series[screen_num], 0);
+            if (has_series_2 && graph_series_2[screen_num]) {
+                lv_chart_set_next_value(graph_charts[screen_num], graph_series_2[screen_num], 0);
+            }
+        }
+        
+        // Replay actual data points
+        int32_t actual_min = buf->series1[start % buf->point_capacity];
+        int32_t actual_max = actual_min;
+        for (int i = 0; i < num_points; i++) {
+            int idx = (start + i) % buf->point_capacity;
+            int32_t v1 = buf->series1[idx];
+            lv_chart_set_next_value(graph_charts[screen_num], graph_series[screen_num], v1);
+            if (v1 < actual_min) actual_min = v1;
+            if (v1 > actual_max) actual_max = v1;
+            if (has_series_2 && graph_series_2[screen_num]) {
+                int32_t v2 = buf->series2[idx];
+                lv_chart_set_next_value(graph_charts[screen_num], graph_series_2[screen_num], v2);
+                if (v2 < actual_min) actual_min = v2;
+                if (v2 > actual_max) actual_max = v2;
+            }
+        }
+        
+        // Set Y-axis range from restored data
+        float range = (float)(actual_max - actual_min);
+        float margin = range * 0.1f;
+        if (margin < 1.0f) margin = 1.0f;
+        int32_t y_min = (int32_t)((float)actual_min - margin);
+        int32_t y_max = (int32_t)((float)actual_max + margin);
+        lv_chart_set_range(graph_charts[screen_num], LV_CHART_AXIS_PRIMARY_Y, y_min, y_max);
+        
+        Serial.printf("[GRAPH] Restored %d points from PSRAM for screen %d\n", num_points, screen_num);
+    } else {
+        // No buffered data — initialize all points to 0
+        for (int i = 0; i < points; i++) {
+            lv_chart_set_next_value(graph_charts[screen_num], graph_series[screen_num], 0);
+            if (has_series_2) {
+                lv_chart_set_next_value(graph_charts[screen_num], graph_series_2[screen_num], 0);
+            }
         }
     }
-    
-    // Initialize sampling timer
-    last_sample_time[screen_num] = 0;
     
     // Create Y-axis labels (min and max values)
     y_min_labels[screen_num] = lv_label_create(screen);
@@ -234,9 +331,13 @@ void graph_display_create(int screen_num) {
 void graph_display_update(int screen_num, float value, const char* unit, const char* description,
                           float value2, const char* unit2, const char* description2) {
     if (screen_num < 0 || screen_num >= NUM_SCREENS) return;
-    if (!graph_charts[screen_num] || !graph_series[screen_num]) return;
     
-    bool has_series_2 = (graph_series_2[screen_num] != NULL && !isnan(value2));
+    // Ensure PSRAM buffer exists (may be called for background screens without chart)
+    graph_data_ensure_buffer(screen_num);
+    GraphDataBuffer* pbuf = graph_buffers[screen_num];
+    
+    bool has_series_2 = (!isnan(value2));
+    bool chart_visible = (graph_charts[screen_num] != NULL && graph_series[screen_num] != NULL);
     
     // Check if enough time has passed based on selected time range
     uint8_t time_range = screen_configs[screen_num].graph_time_range;
@@ -245,98 +346,109 @@ void graph_display_update(int screen_num, float value, const char* unit, const c
     unsigned long now = millis();
     unsigned long interval = sample_intervals[time_range];
     
+    // Use the PSRAM buffer's timing if available, fall back to millis check
+    unsigned long last_time = pbuf ? pbuf->last_sample_time : 0;
+    
     // Only add a new sample if enough time has elapsed
-    if (last_sample_time[screen_num] == 0 || (now - last_sample_time[screen_num]) >= interval) {
-        last_sample_time[screen_num] = now;
+    if (last_time == 0 || (now - last_time) >= interval) {
+        if (pbuf) pbuf->last_sample_time = now;
         
-        // Update description label
-        if (description_labels[screen_num] && description) {
-            lv_label_set_text(description_labels[screen_num], description);
-        }
-        
-        // Update unit label
-        if (unit_labels[screen_num] && unit) {
-            lv_label_set_text(unit_labels[screen_num], unit);
-        }
-        
-        // Update second series labels if present
-        if (has_series_2) {
-            if (description_labels_2[screen_num] && description2) {
-                lv_label_set_text(description_labels_2[screen_num], description2);
-            }
-            if (unit_labels_2[screen_num] && unit2) {
-                lv_label_set_text(unit_labels_2[screen_num], unit2);
-            }
-        }
-        
-        // Add new values to chart first
         int32_t scaled_value = (int32_t)value;
-        lv_chart_set_next_value(graph_charts[screen_num], graph_series[screen_num], scaled_value);
+        int32_t scaled_value2 = has_series_2 ? (int32_t)value2 : 0;
         
-        if (has_series_2) {
-            int32_t scaled_value2 = (int32_t)value2;
-            lv_chart_set_next_value(graph_charts[screen_num], graph_series_2[screen_num], scaled_value2);
-        }
+        // Always store to PSRAM ring buffer
+        graph_buffer_push(screen_num, scaled_value, scaled_value2, has_series_2);
         
-        // Recalculate min/max from actual chart data (so range can shrink when data decreases)
-        uint16_t point_count = lv_chart_get_point_count(graph_charts[screen_num]);
-        lv_coord_t* y_array = lv_chart_get_y_array(graph_charts[screen_num], graph_series[screen_num]);
-        
-        lv_coord_t actual_min = y_array[0];
-        lv_coord_t actual_max = y_array[0];
-        
-        // Find min/max from first series
-        for (uint16_t i = 1; i < point_count; i++) {
-            if (y_array[i] < actual_min) actual_min = y_array[i];
-            if (y_array[i] > actual_max) actual_max = y_array[i];
-        }
-        
-        // Include second series if present
-        if (has_series_2) {
-            lv_coord_t* y_array2 = lv_chart_get_y_array(graph_charts[screen_num], graph_series_2[screen_num]);
-            for (uint16_t i = 0; i < point_count; i++) {
-                if (y_array2[i] < actual_min) actual_min = y_array2[i];
-                if (y_array2[i] > actual_max) actual_max = y_array2[i];
+        // If chart is visible, update LVGL objects too
+        if (chart_visible) {
+            bool chart_has_s2 = (graph_series_2[screen_num] != NULL && has_series_2);
+            
+            // Update description label
+            if (description_labels[screen_num] && description) {
+                lv_label_set_text(description_labels[screen_num], description);
             }
-        }
-        
-        // Add 10% margin to range for better visualization.
-        // Ensure minimum 1-unit margin so the chart is never set to [N, N]
-        // (which would truncate all data and render as a blank screen).
-        float range = (float)(actual_max - actual_min);
-        float margin = range * 0.1f;
-        if (margin < 1.0f) margin = 1.0f;   // ← floor: cast to int must give at least ±1
-        int32_t y_min = (int32_t)((float)actual_min - margin);
-        int32_t y_max = (int32_t)((float)actual_max + margin);
+            
+            // Update unit label
+            if (unit_labels[screen_num] && unit) {
+                lv_label_set_text(unit_labels[screen_num], unit);
+            }
+            
+            // Update second series labels if present
+            if (chart_has_s2) {
+                if (description_labels_2[screen_num] && description2) {
+                    lv_label_set_text(description_labels_2[screen_num], description2);
+                }
+                if (unit_labels_2[screen_num] && unit2) {
+                    lv_label_set_text(unit_labels_2[screen_num], unit2);
+                }
+            }
+            
+            // Add new values to chart
+            lv_chart_set_next_value(graph_charts[screen_num], graph_series[screen_num], scaled_value);
+            
+            if (chart_has_s2) {
+                lv_chart_set_next_value(graph_charts[screen_num], graph_series_2[screen_num], scaled_value2);
+            }
+            
+            // Recalculate min/max from actual chart data (so range can shrink when data decreases)
+            uint16_t point_count = lv_chart_get_point_count(graph_charts[screen_num]);
+            lv_coord_t* y_array = lv_chart_get_y_array(graph_charts[screen_num], graph_series[screen_num]);
+            
+            lv_coord_t actual_min = y_array[0];
+            lv_coord_t actual_max = y_array[0];
+            
+            // Find min/max from first series
+            for (uint16_t i = 1; i < point_count; i++) {
+                if (y_array[i] < actual_min) actual_min = y_array[i];
+                if (y_array[i] > actual_max) actual_max = y_array[i];
+            }
+            
+            // Include second series if present
+            if (chart_has_s2) {
+                lv_coord_t* y_array2 = lv_chart_get_y_array(graph_charts[screen_num], graph_series_2[screen_num]);
+                for (uint16_t i = 0; i < point_count; i++) {
+                    if (y_array2[i] < actual_min) actual_min = y_array2[i];
+                    if (y_array2[i] > actual_max) actual_max = y_array2[i];
+                }
+            }
+            
+            // Add 10% margin to range for better visualization.
+            // Ensure minimum 1-unit margin so the chart is never set to [N, N]
+            float range_f = (float)(actual_max - actual_min);
+            float margin = range_f * 0.1f;
+            if (margin < 1.0f) margin = 1.0f;
+            int32_t y_min = (int32_t)((float)actual_min - margin);
+            int32_t y_max = (int32_t)((float)actual_max + margin);
 
-        // Diagnostic: log every 5s so we can see what the chart is actually doing
-        static unsigned long last_chart_log[5] = {0,0,0,0,0};
-        unsigned long now_cl = millis();
-        if (now_cl - last_chart_log[screen_num] > 5000) {
-            last_chart_log[screen_num] = now_cl;
-            Serial.printf("[CHART] s=%d val1=%.2f(->%d) val2=%.2f(->%d) actual=[%d,%d] range=[%d,%d]\n",
-                screen_num, value, (int)value,
-                isnan(value2) ? 0.0f : value2, has_series_2 ? (int)value2 : -999,
-                (int)actual_min, (int)actual_max, (int)y_min, (int)y_max);
-            Serial.flush();
-        }
+            // Diagnostic: log every 5s so we can see what the chart is actually doing
+            static unsigned long last_chart_log[5] = {0,0,0,0,0};
+            unsigned long now_cl = millis();
+            if (now_cl - last_chart_log[screen_num] > 5000) {
+                last_chart_log[screen_num] = now_cl;
+                Serial.printf("[CHART] s=%d val1=%.2f(->%d) val2=%.2f(->%d) actual=[%d,%d] range=[%d,%d]\n",
+                    screen_num, value, (int)value,
+                    isnan(value2) ? 0.0f : value2, chart_has_s2 ? (int)value2 : -999,
+                    (int)actual_min, (int)actual_max, (int)y_min, (int)y_max);
+                Serial.flush();
+            }
 
-        // Update Y-axis range
-        lv_chart_set_range(graph_charts[screen_num], LV_CHART_AXIS_PRIMARY_Y, y_min, y_max);
-        
-        // Update Y-axis labels
-        if (y_min_labels[screen_num]) {
-            char buf[16];
-            snprintf(buf, sizeof(buf), "%d", y_min);
-            lv_label_set_text(y_min_labels[screen_num], buf);
+            // Update Y-axis range
+            lv_chart_set_range(graph_charts[screen_num], LV_CHART_AXIS_PRIMARY_Y, y_min, y_max);
+            
+            // Update Y-axis labels
+            if (y_min_labels[screen_num]) {
+                char lbuf[16];
+                snprintf(lbuf, sizeof(lbuf), "%d", y_min);
+                lv_label_set_text(y_min_labels[screen_num], lbuf);
+            }
+            if (y_max_labels[screen_num]) {
+                char lbuf[16];
+                snprintf(lbuf, sizeof(lbuf), "%d", y_max);
+                lv_label_set_text(y_max_labels[screen_num], lbuf);
+            }
+            
+            lv_chart_refresh(graph_charts[screen_num]);
         }
-        if (y_max_labels[screen_num]) {
-            char buf[16];
-            snprintf(buf, sizeof(buf), "%d", y_max);
-            lv_label_set_text(y_max_labels[screen_num], buf);
-        }
-        
-        lv_chart_refresh(graph_charts[screen_num]);
     }
 }
 
@@ -386,8 +498,6 @@ void graph_display_destroy(int screen_num) {
         bg_panels[screen_num] = NULL;
     }
     
-    // Reset auto-ranging data
-    data_min[screen_num] = 0;
-    data_max[screen_num] = 100;
-    data_count[screen_num] = 0;
+    // NOTE: PSRAM buffer is intentionally NOT freed here so data
+    // persists across screen switches and can be restored later.
 }

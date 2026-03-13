@@ -748,17 +748,6 @@ static void update_graph_display_for_screen(int screen_num) {
     // Get the configured Signal K path for the graph
     String graph_path = String(screen_configs[screen_idx].number_path);  // Reuse number_path field
     
-    // Diagnostic: log path and raw value for troubleshooting (once every 5s per screen)
-    static unsigned long last_graph_log[5] = {0, 0, 0, 0, 0};
-    unsigned long now_log = millis();
-    if (now_log - last_graph_log[screen_idx] > 5000) {
-        last_graph_log[screen_idx] = now_log;
-        float dbg = get_sensor_value_by_path(graph_path);
-        Serial.printf("[GRAPH] s=%d path1='%s' val=%.2f path2='%s'\n",
-            screen_idx, graph_path.c_str(), dbg,
-            screen_configs[screen_idx].graph_path_2);
-    }
-    
     // Helper lambda to get value and metadata for a path
     auto get_path_data = [](const String& path, float& value, String& unit, String& description) {
         if (path.length() == 0) {
@@ -1328,6 +1317,15 @@ void loop() {
             }
 
             update_needles_for_screen(current_screen);
+            
+            // Background graph data collection for non-visible graph screens
+            // This ensures PSRAM buffers keep accumulating data even when swiped away
+            for (int bg = 0; bg < NUM_SCREENS; bg++) {
+                if (bg == (current_screen - 1)) continue;  // Active screen handled above
+                if (screen_configs[bg].display_type != DISPLAY_TYPE_GRAPH) continue;
+                update_graph_display_for_screen(bg + 1);  // 1-based screen number
+            }
+            
             last_needle_update = now;
         }
         

@@ -20,6 +20,11 @@ void graph_display_update(int screen_num, float value, const char* unit, const c
                           float value2, const char* unit2, const char* description2);
 void graph_display_destroy(int screen_num);
 
+// PSRAM-backed graph data persistence
+// Ensures graph data survives screen switches and collects in background
+void graph_data_ensure_buffer(int screen_num);
+void graph_data_free(int screen_num);
+
 #ifdef __cplusplus
 }
 #endif

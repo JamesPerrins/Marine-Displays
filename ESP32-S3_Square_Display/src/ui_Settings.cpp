@@ -354,7 +354,7 @@ extern "C" void ui_Settings_screen_init(void)
     ui_IPLabel = lv_label_create(ui_SettingsPanel);
     lv_label_set_text(ui_IPLabel, "Checking...");
     lv_obj_set_style_text_color(ui_IPLabel, lv_color_hex(0x00FF00), 0);
-    lv_obj_set_x(ui_IPLabel, 40);
+    lv_obj_set_x(ui_IPLabel, 70);
     lv_obj_set_y(ui_IPLabel, -150);
     lv_obj_set_align(ui_IPLabel, LV_ALIGN_CENTER);
     

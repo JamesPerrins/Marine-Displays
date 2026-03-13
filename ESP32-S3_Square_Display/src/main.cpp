@@ -1086,6 +1086,8 @@ void setup() {
     // before Serial.begin / delays so the buzzer is silenced within ~20ms of boot.
     I2C_Init();
     delay(10); // let Wire bus settle before I2C transactions
+    // Detect board version (v3=0x20, v4=0x24) before any expander operations
+    detect_expander_address();
     // Write OUTPUT register first (PIN6 HIGH = buzzer OFF) BEFORE switching CONFIG to output,
     // so there is no glitch-LOW when the pin transitions from high-Z to driven.
     Set_EXIOS(0xDF);             // output latch: PIN6 LOW (bit5=0, 0xDF=11011111) = buzzer OFF

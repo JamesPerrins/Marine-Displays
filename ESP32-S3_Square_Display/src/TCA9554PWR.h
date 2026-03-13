@@ -13,7 +13,10 @@
 
 /****************************************************** The macro defines the TCA9554PWR information ******************************************************/ 
 
-#define TCA9554_ADDRESS         0x20                      // TCA9554PWR I2C address
+#define TCA9554_ADDR_V3         0x20                      // TCA9554PWR I2C address (v3 boards)
+#define TCA9554_ADDR_V4         0x24                      // TCA9554PWR I2C address (v4 boards)
+extern uint8_t g_tca9554_address;                         // Detected at runtime
+#define TCA9554_ADDRESS         g_tca9554_address          // Use detected address
 
 #define TCA9554_INPUT_REG       0x00                      // Input register,input level
 #define TCA9554_OUTPUT_REG      0x01                      // Output register, high and low level output 
@@ -48,3 +51,6 @@ void Set_EXIOS(uint8_t PinState);                           // Set 7 pins to the
 void Set_Toggle(uint8_t Pin);                               // Flip the level of the TCA9554PWR Pin
 /********************************************************* TCA9554PWR Initializes the device ***********************************************************/  
 void TCA9554PWR_Init(uint8_t PinState = 0x00);              // Set the seven pins to PinState state, for example :PinState=0x23, 0010 0011 State (the highest bit is not used) (Output mode or input mode) 0= Output mode 1= Input mode. The default value is output mode
+
+bool detect_expander_address();                             // Probe I2C bus to detect v3 (0x20) or v4 (0x24) expander
+bool is_board_v4();                                         // Returns true if v4 board detected

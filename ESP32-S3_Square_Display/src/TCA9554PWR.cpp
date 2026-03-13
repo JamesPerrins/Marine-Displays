@@ -1,4 +1,38 @@
 #include "TCA9554PWR.h"
+#include <Arduino.h>
+
+// Runtime I2C address for the IO expander (default v3=0x20, v4=0x24)
+uint8_t g_tca9554_address = TCA9554_ADDR_V3;
+static bool g_board_v4 = false;
+
+bool detect_expander_address()
+{
+  // Probe v3 address (0x20) first
+  Wire.beginTransmission(TCA9554_ADDR_V3);
+  if (Wire.endTransmission() == 0) {
+    g_tca9554_address = TCA9554_ADDR_V3;
+    g_board_v4 = false;
+    Serial.println("[BOARD] Detected v3 IO expander at 0x20");
+    return true;
+  }
+  // Probe v4 address (0x24)
+  Wire.beginTransmission(TCA9554_ADDR_V4);
+  if (Wire.endTransmission() == 0) {
+    g_tca9554_address = TCA9554_ADDR_V4;
+    g_board_v4 = true;
+    Serial.println("[BOARD] Detected v4 IO expander at 0x24");
+    return true;
+  }
+  Serial.println("[BOARD] WARNING: No IO expander found at 0x20 or 0x24, defaulting to 0x20");
+  g_tca9554_address = TCA9554_ADDR_V3;
+  g_board_v4 = false;
+  return false;
+}
+
+bool is_board_v4()
+{
+  return g_board_v4;
+}
 
 /*****************************************************  Operation register REG   ****************************************************/   
 uint8_t I2C_Read_EXIO(uint8_t REG)                             // Read the value of the TCA9554PWR register REG
@@ -9,7 +43,7 @@ uint8_t I2C_Read_EXIO(uint8_t REG)                             // Read the value
   if (result != 0) {                                     
     printf("Data Transfer Failure !!!\r\n");
   }
-  Wire.requestFrom(TCA9554_ADDRESS, 1);                   
+  Wire.requestFrom((uint8_t)TCA9554_ADDRESS, (uint8_t)1);                   
   uint8_t bitsStatus = Wire.read();                        
   return bitsStatus;                                     
 }

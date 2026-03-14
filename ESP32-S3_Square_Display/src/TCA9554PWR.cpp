@@ -3,7 +3,7 @@
 
 // Runtime I2C address for the IO expander (default v3=0x20, v4=0x24)
 uint8_t g_tca9554_address = TCA9554_ADDR_V3;
-static bool g_board_v4 = false;
+static bool g_board_v4 = true;
 
 bool detect_expander_address()
 {
@@ -31,7 +31,7 @@ bool detect_expander_address()
 
 bool is_board_v4()
 {
-  return true; //g_board_v4;
+  return g_board_v4;
 }
 
 /*****************************************************  Operation register REG   ****************************************************/   
@@ -41,7 +41,7 @@ uint8_t I2C_Read_EXIO(uint8_t REG)                             // Read the value
   Wire.write(REG);                                        
   uint8_t result = Wire.endTransmission();               
   if (result != 0) {                                     
-    printf("Data Transfer Failure !!!\r\n");
+    if (!g_board_v4) {printf("Data Transfer Failure !!!\r\n");}
   }
   Wire.requestFrom((uint8_t)TCA9554_ADDRESS, (uint8_t)1);                   
   uint8_t bitsStatus = Wire.read();                        
@@ -54,7 +54,7 @@ uint8_t I2C_Write_EXIO(uint8_t REG,uint8_t Data)              // Write Data to t
   Wire.write(Data);                                       
   uint8_t result = Wire.endTransmission();                  
   if (result != 0) {    
-    printf("Data write failure!!!\r\n");
+    if (!g_board_v4) {printf("Data write failure!!!\r\n");}
     return -1;
   }
   return 0;                                             
@@ -70,14 +70,14 @@ void Mode_EXIO(uint8_t Pin,uint8_t State)                 // Set the mode of the
     Data = (~(0x01 << (Pin-1))) & bitsStatus; // clear bit = output
   uint8_t result = I2C_Write_EXIO(TCA9554_CONFIG_REG,Data); 
   if (result != 0) { 
-    printf("I/O Configuration Failure !!!\r\n");
+    if (!g_board_v4) {printf("I/O Configuration Failure !!!\r\n");}
   }
 }
 void Mode_EXIOS(uint8_t PinState)                         // Set the mode of the 7 pins from the TCA9554PWR with PinState   
 {
   uint8_t result = I2C_Write_EXIO(TCA9554_CONFIG_REG,PinState);  
   if (result != 0) {   
-    printf("I/O Configuration Failure !!!\r\n");
+    if (!g_board_v4) {printf("I/O Configuration Failure !!!\r\n");}
   }
 }
 /********************************************************** Read EXIO status **********************************************************/       
@@ -105,17 +105,17 @@ void Set_EXIO(uint8_t Pin,uint8_t State)                  // Sets the level stat
       Data = (~(0x01 << (Pin-1))) & bitsStatus;      
     uint8_t result = I2C_Write_EXIO(TCA9554_OUTPUT_REG,Data);  
     if (result != 0) {                         
-      printf("Failed to set GPIO!!!\r\n");
+      if (!g_board_v4) {printf("Failed to set GPIO!!!\r\n");}
     }
   }
   else                                           
-    printf("Parameter error, please enter the correct parameter!\r\n");
+    if (!g_board_v4) {printf("Parameter error, please enter the correct parameter!\r\n");}
 }
 void Set_EXIOS(uint8_t PinState)                          // Set 7 pins to the PinState state such as :PinState=0x23, 0010 0011 state (the highest bit is not used)
 {
   uint8_t result = I2C_Write_EXIO(TCA9554_OUTPUT_REG,PinState); 
   if (result != 0) {                  
-    printf("Failed to set GPIO!!!\r\n");
+    if (!g_board_v4) {printf("Failed to set GPIO!!!\r\n");}
   }
 }
 /********************************************************** Flip EXIO state **********************************************************/  

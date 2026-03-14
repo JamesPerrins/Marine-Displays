@@ -39,6 +39,12 @@ static lv_timer_t *settings_refresh_timer = NULL;
 int buzzer_mode = 0;
 uint16_t buzzer_cooldown_sec = 60; // default 60s
 
+// Brightness level: 0=Normal, 1=Dim, 2=Night, 3=Night+
+uint8_t brightness_level = 0;
+static lv_obj_t *night_overlays[6] = {NULL}; // 0-4 = Screen1-5, 5 = Settings
+static lv_obj_t *ui_BrightnessDrop = NULL;
+static lv_obj_t *ui_BrightnessLevelLabel = NULL;
+
 // Buzzer alert function.
 // Circuit: PIN6 LOW -> Q1 off -> Q7 on -> buzzer ON  (active-LOW via NPN pair)
 //          PIN6 HIGH -> Q1 on -> Q7 off -> buzzer OFF
@@ -154,6 +160,11 @@ extern "C" void update_settings_values(void)
         else if (auto_scroll_sec == 30) sel = 3;
         lv_dropdown_set_selected(ui_AutoScrollDrop, sel);
     }
+    
+    // Update brightness dropdown
+    if (ui_BrightnessDrop != NULL) {
+        lv_dropdown_set_selected(ui_BrightnessDrop, brightness_level);
+    }
 }
 
 // Event handler for back button (swipe up)
@@ -204,6 +215,84 @@ static void swipe_up_event_cb(lv_event_t *e)
         
         settings_swipe_in_progress = false;
     }
+}
+
+// ── Brightness overlay management ─────────────────────────────────────
+// Creates a full-screen semi-transparent overlay on each screen.
+// Overlays are non-clickable so touch events pass through to widgets below.
+static lv_obj_t* create_night_overlay(lv_obj_t *parent) {
+    lv_obj_t *overlay = lv_obj_create(parent);
+    lv_obj_remove_style_all(overlay);
+    lv_obj_set_size(overlay, 480, 480);
+    lv_obj_set_align(overlay, LV_ALIGN_CENTER);
+    lv_obj_set_style_bg_color(overlay, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_opa(overlay, LV_OPA_TRANSP, 0);
+    lv_obj_clear_flag(overlay, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE |
+                                LV_OBJ_FLAG_CLICK_FOCUSABLE | LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_add_flag(overlay, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    lv_obj_add_flag(overlay, LV_OBJ_FLAG_HIDDEN);  // hidden by default
+    lv_obj_move_foreground(overlay);
+    return overlay;
+}
+
+// Apply color and opacity to an overlay based on brightness level
+static void apply_overlay_style(lv_obj_t *overlay, uint8_t level) {
+    switch (level) {
+        case 1: // Dim: dark overlay, no red tint
+            lv_obj_set_style_bg_color(overlay, lv_color_make(0, 0, 0), 0);
+            lv_obj_set_style_bg_opa(overlay, LV_OPA_40, 0);
+            break;
+        case 2: // Night: dark red
+            lv_obj_set_style_bg_color(overlay, lv_color_make(40, 0, 0), 0);
+            lv_obj_set_style_bg_opa(overlay, LV_OPA_60, 0);
+            break;
+        case 3: // Night+: darker red
+            lv_obj_set_style_bg_color(overlay, lv_color_make(30, 0, 0), 0);
+            lv_obj_set_style_bg_opa(overlay, LV_OPA_80, 0);
+            break;
+        default: // Normal: hidden
+            break;
+    }
+}
+
+extern "C" void night_mode_init_overlays(void) {
+    lv_obj_t *screens[6] = {ui_Screen1, ui_Screen2, ui_Screen3,
+                             ui_Screen4, ui_Screen5, ui_Settings};
+    for (int i = 0; i < 6; i++) {
+        if (screens[i] && !night_overlays[i]) {
+            night_overlays[i] = create_night_overlay(screens[i]);
+        }
+    }
+    if (brightness_level > 0) {
+        set_brightness_level(brightness_level);
+    }
+}
+
+extern "C" void set_brightness_level(uint8_t level) {
+    brightness_level = level;
+    for (int i = 0; i < 6; i++) {
+        if (night_overlays[i]) {
+            if (level > 0) {
+                apply_overlay_style(night_overlays[i], level);
+                lv_obj_clear_flag(night_overlays[i], LV_OBJ_FLAG_HIDDEN);
+            } else {
+                lv_obj_add_flag(night_overlays[i], LV_OBJ_FLAG_HIDDEN);
+            }
+            lv_obj_move_foreground(night_overlays[i]);
+        }
+    }
+    // Update dropdown widget if it exists
+    if (ui_BrightnessDrop) {
+        lv_dropdown_set_selected(ui_BrightnessDrop, level);
+    }
+    // Persist to NVS
+    Preferences pn;
+    if (pn.begin("settings", false)) {
+        pn.putUChar("brightness_lv", level);
+        pn.end();
+    }
+    static const char *labels[] = {"Normal", "Dim", "Night", "Night+"};
+    Serial.printf("[BRIGHT] Brightness: %s\n", labels[level < 4 ? level : 0]);
 }
 
 extern "C" void ui_Settings_screen_init(void)
@@ -405,14 +494,6 @@ extern "C" void ui_Settings_screen_init(void)
     lv_obj_set_y(ui_AutoScrollDrop, 80);
     lv_obj_set_align(ui_AutoScrollDrop, LV_ALIGN_CENTER);
 
-    // Instruction text (moved below auto-scroll)
-    lv_obj_t *instruction = lv_label_create(ui_SettingsPanel);
-    lv_label_set_text(instruction, "Swipe up to return");
-    lv_obj_set_style_text_color(instruction, lv_color_hex(0x808080), 0);
-    lv_obj_set_x(instruction, 0);
-    lv_obj_set_y(instruction, 150);
-    lv_obj_set_align(instruction, LV_ALIGN_CENTER);
-
     // Set current selection from persisted value
     extern uint16_t auto_scroll_sec;
     sel = 0;
@@ -438,4 +519,56 @@ extern "C" void ui_Settings_screen_init(void)
         // Apply immediately
         set_auto_scroll_interval(sec);
     }, LV_EVENT_VALUE_CHANGED, NULL);
+
+    // Brightness dropdown (between auto-scroll and instruction)
+    ui_BrightnessLevelLabel = lv_label_create(ui_SettingsPanel);
+    lv_label_set_text(ui_BrightnessLevelLabel, "Brightness:");
+    lv_obj_set_style_text_color(ui_BrightnessLevelLabel, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_x(ui_BrightnessLevelLabel, -70);
+    lv_obj_set_y(ui_BrightnessLevelLabel, 130);
+    lv_obj_set_align(ui_BrightnessLevelLabel, LV_ALIGN_CENTER);
+
+    ui_BrightnessDrop = lv_dropdown_create(ui_SettingsPanel);
+    lv_dropdown_set_options(ui_BrightnessDrop, "Normal\nDim\nNight\nNight+");
+    lv_obj_set_width(ui_BrightnessDrop, 110);
+    lv_obj_set_x(ui_BrightnessDrop, 40);
+    lv_obj_set_y(ui_BrightnessDrop, 130);
+    lv_obj_set_align(ui_BrightnessDrop, LV_ALIGN_CENTER);
+    lv_obj_set_style_text_font(ui_BrightnessDrop, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_bg_color(ui_BrightnessDrop, lv_color_hex(0x333333), 0);
+    lv_obj_set_style_text_color(ui_BrightnessDrop, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_border_color(ui_BrightnessDrop, lv_color_hex(0x555555), 0);
+
+    // Load brightness level from NVS
+    {
+        Preferences pnm;
+        if (pnm.begin("settings", true)) {
+            brightness_level = pnm.getUChar("brightness_lv", 0);
+            if (brightness_level > 3) brightness_level = 0;
+            pnm.end();
+        }
+        lv_dropdown_set_selected(ui_BrightnessDrop, brightness_level);
+    }
+
+    lv_obj_add_event_cb(ui_BrightnessDrop, [](lv_event_t *e){
+        lv_obj_t *dd = lv_event_get_target(e);
+        uint8_t lvl = (uint8_t)lv_dropdown_get_selected(dd);
+        set_brightness_level(lvl);
+    }, LV_EVENT_VALUE_CHANGED, NULL);
+
+    // Instruction text
+    lv_obj_t *instruction = lv_label_create(ui_SettingsPanel);
+    lv_label_set_text(instruction, "Swipe up to return");
+    lv_obj_set_style_text_color(instruction, lv_color_hex(0x808080), 0);
+    lv_obj_set_x(instruction, 0);
+    lv_obj_set_y(instruction, 180);
+    lv_obj_set_align(instruction, LV_ALIGN_CENTER);
+
+    // Set current selection from persisted value
+    extern uint16_t auto_scroll_sec;
+    sel = 0;
+    if (auto_scroll_sec == 5) sel = 1;
+    else if (auto_scroll_sec == 10) sel = 2;
+    else if (auto_scroll_sec == 30) sel = 3;
+    lv_dropdown_set_selected(ui_AutoScrollDrop, sel);
 }

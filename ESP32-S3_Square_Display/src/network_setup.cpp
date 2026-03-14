@@ -12,6 +12,7 @@
 #include "signalk_config.h"
 #include "gauge_config.h"
 #include "screen_config_c_api.h"
+#include "ui_Settings.h"
 #include <FS.h>
 #include <SPIFFS.h>
 #include <SD_MMC.h>
@@ -2043,6 +2044,13 @@ void handle_device_page() {
     html += "<option value='30'" + String(auto_scroll_sec==30?" selected":"") + ">30s</option>";
     html += "<option value='60'" + String(auto_scroll_sec==60?" selected":"") + ">60s</option>";
     html += "</select></div>";
+    // Brightness
+    html += "<div class='form-row'><label>Brightness:</label><select name='brightness_lv'>";
+    html += "<option value='0'" + String(brightness_level==0?" selected":"") + ">Normal</option>";
+    html += "<option value='1'" + String(brightness_level==1?" selected":"") + ">Dim</option>";
+    html += "<option value='2'" + String(brightness_level==2?" selected":"") + ">Night</option>";
+    html += "<option value='3'" + String(brightness_level==3?" selected":"") + ">Night+</option>";
+    html += "</select></div>";
     html += "<div style='text-align:center;margin-top:12px;'><button class='tab-btn' type='submit' style='padding:10px 18px;'>Save</button></div>";
     html += "</form>";
     html += "<p style='text-align:center; margin-top:10px;'><a href='/'>Back</a></p>";
@@ -2069,6 +2077,11 @@ void handle_save_device() {
         auto_scroll_sec = asc;
         // Apply auto-scroll at runtime
         set_auto_scroll_interval(auto_scroll_sec);
+        
+        // Brightness level
+        uint8_t bl = (uint8_t)config_server.arg("brightness_lv").toInt();
+        if (bl > 3) bl = 0;
+        set_brightness_level(bl);
 
         // Persist settings
         save_preferences();

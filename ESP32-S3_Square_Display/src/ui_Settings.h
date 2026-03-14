@@ -19,6 +19,9 @@ extern int buzzer_mode;  // 0 = Off, 1 = Global, 2 = Per-screen
 extern uint16_t buzzer_cooldown_sec; // 0 = constant, otherwise seconds between beeps
 extern bool first_run_buzzer; // Set by settings when cooldown changes to allow immediate re-eval
 
+// Brightness level: 0=Normal, 1=Dim, 2=Night, 3=Night+
+extern uint8_t brightness_level;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -26,6 +29,8 @@ extern "C" {
 void ui_Settings_screen_init(void);
 void update_ip_address(void);
 void trigger_buzzer_alert(void);
+void night_mode_init_overlays(void);
+void set_brightness_level(uint8_t level);
 
 #ifdef __cplusplus
 }

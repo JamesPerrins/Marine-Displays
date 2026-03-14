@@ -5,6 +5,7 @@
 #include "dual_number_display.h"
 #include "quad_number_display.h"
 #include "gauge_number_display.h"
+#include "ui_Settings.h"
 #include "graph_display.h"
 #include "compass_display.h"
 #include "position_display.h"
@@ -368,6 +369,10 @@ bool apply_screen_visuals_for_one(int s) {
         }
     }
     ESP_LOGI(TAG_UIHOT, "[APPLY_ONE] Completed screen %d", s);
+    // Ensure night mode overlay stays on top after new objects were created
+    if (brightness_level > 0) {
+        night_mode_init_overlays();
+    }
     return any;
 }
 

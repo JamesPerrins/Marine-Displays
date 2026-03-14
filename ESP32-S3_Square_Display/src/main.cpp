@@ -1190,6 +1190,7 @@ void setup() {
     Serial.flush();
 
     ui_init();  // Load SquareLine UI
+    night_mode_init_overlays();  // Create night mode overlays on all screens
     Serial.println("LVGL and UI initialized");
     Serial.flush();
 

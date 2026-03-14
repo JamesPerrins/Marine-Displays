@@ -631,6 +631,7 @@ void LCD_Init() {
 
   ST7701_Reset();
   ST7701_Init();
+  Touch_Init();
 
   // Restore backlight state
   Backlight_Init();

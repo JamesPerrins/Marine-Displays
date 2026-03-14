@@ -31,7 +31,7 @@ bool detect_expander_address()
 
 bool is_board_v4()
 {
-  return g_board_v4;
+  return true; //g_board_v4;
 }
 
 /*****************************************************  Operation register REG   ****************************************************/   

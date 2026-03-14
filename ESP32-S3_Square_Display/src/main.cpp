@@ -1076,7 +1076,7 @@ void setup() {
     I2C_Init();
     delay(10); // let Wire bus settle before I2C transactions
     // Detect board version (v3=0x20, v4=0x24) before any expander operations
-    detect_expander_address();
+    //detect_expander_address();
     // Write OUTPUT register first (PIN6 HIGH = buzzer OFF) BEFORE switching CONFIG to output,
     // so there is no glitch-LOW when the pin transitions from high-Z to driven.
     Set_EXIOS(0xDF);             // output latch: PIN6 LOW (bit5=0, 0xDF=11011111) = buzzer OFF
@@ -1093,7 +1093,14 @@ void setup() {
     Serial.flush();
     
     // I2C and IO expander already initialized above; re-assert buzzer OFF after delay
-    Set_EXIO(EXIO_PIN6, Low);    // re-assert buzzer OFF (active-HIGH: Low=off, High=on)
+    if (is_board_v4()) {
+        Set_EXIO(EXIO_PIN8, Low);    // Start with buzzer OFF
+        Set_EXIO(EXIO_PIN3, High);   // CS deasserted (HIGH) before SPI init - prevents spurious SPI edges on cold boot
+        ets_printf("*** [BOARD] v4 pin set ***\r\n");
+    } else {
+        Set_EXIO(EXIO_PIN6, Low);    // re-assert buzzer OFF (active-HIGH: Low=off, High=on)
+        ets_printf("*** [BOARD] v3 pin set ***\r\n");
+    }    
     ets_printf("*** I2C+expander done ***\r\n");
     Serial.println("I2C and IO expander initialized");
     Serial.flush();

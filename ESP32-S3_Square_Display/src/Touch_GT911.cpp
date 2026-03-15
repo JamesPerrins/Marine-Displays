@@ -12,7 +12,7 @@ bool I2C_Read_Touch(uint8_t Driver_addr, uint16_t Reg_addr, uint8_t *Reg_data, u
   Wire.write((uint8_t)(Reg_addr >> 8)); 
   Wire.write((uint8_t)Reg_addr);         
   if ( Wire.endTransmission(true)){
-    printf("The I2C transmission fails. - I2C Read\r\n");
+    if (!is_board_v4()) {printf("The I2C transmission fails. - I2C Read\r\n");}
     return false;
   }
   Wire.requestFrom(Driver_addr, Length);
@@ -31,7 +31,7 @@ bool I2C_Write_Touch(uint8_t Driver_addr, uint16_t Reg_addr, const uint8_t *Reg_
   }
   if ( Wire.endTransmission(true))
   {
-    printf("The I2C transmission fails. - I2C Write\r\n");
+    if (!is_board_v4()) {printf("The I2C transmission fails. - I2C Write\r\n");}
     return false;
   }
   return true;

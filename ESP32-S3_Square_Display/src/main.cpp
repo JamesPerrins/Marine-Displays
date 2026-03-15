@@ -56,6 +56,8 @@ int16_t last_bottom_angle[6] = {0, 180, 180, 180, 180, 180};  // [screen] - all 
 // Buzzer runtime state (moved to file-scope so settings can signal immediate re-eval)
 unsigned long last_buzzer_time = 0;
 bool first_run_buzzer = true;
+static unsigned long last_alarm_log_time = 0;  // rate-limit alarm serial output
+#define ALARM_LOG_INTERVAL_MS 5000
 
 // Animation callback for upper needle
 static void needle_anim_cb(void * var, int32_t v) {
@@ -426,10 +428,13 @@ static void update_number_display_for_screen(int screen_num) {
         bool low_fired  = low_armed  && (display_value < low_thresh);
         bool high_fired = high_armed && (display_value > high_thresh);
         if ((low_fired || high_fired) && (first_run_buzzer || cooldown_ok)) {
-            Serial.printf("[ALARM] screen=%d number=%.2f low=%s(%.2f) high=%s(%.2f)\n",
-                screen_idx, display_value,
-                low_fired  ? "TRIP" : "ok", low_thresh,
-                high_fired ? "TRIP" : "ok", high_thresh);
+            if (now_buz - last_alarm_log_time > ALARM_LOG_INTERVAL_MS) {
+                Serial.printf("[ALARM] screen=%d number=%.2f low=%s(%.2f) high=%s(%.2f)\n",
+                    screen_idx, display_value,
+                    low_fired  ? "TRIP" : "ok", low_thresh,
+                    high_fired ? "TRIP" : "ok", high_thresh);
+                last_alarm_log_time = now_buz;
+            }
             trigger_buzzer_alert();
             last_buzzer_time = now_buz;
             first_run_buzzer = false;
@@ -531,10 +536,13 @@ static void update_dual_number_display_for_screen(int screen_num) {
             bool lf = la && (dual_vals[ch] < screen_configs[screen_idx].min[ch][1]);
             bool hf = ha && (dual_vals[ch] > screen_configs[screen_idx].max[ch][2]);
             if ((lf || hf) && (first_run_buzzer || cooldown_ok)) {
-                Serial.printf("[ALARM DUAL] screen=%d ch=%d val=%.2f low=%s(%.2f) high=%s(%.2f)\n",
-                    screen_idx, ch, dual_vals[ch],
-                    lf ? "TRIP" : "ok", screen_configs[screen_idx].min[ch][1],
-                    hf ? "TRIP" : "ok", screen_configs[screen_idx].max[ch][2]);
+                if (now_buz - last_alarm_log_time > ALARM_LOG_INTERVAL_MS) {
+                    Serial.printf("[ALARM DUAL] screen=%d ch=%d val=%.2f low=%s(%.2f) high=%s(%.2f)\n",
+                        screen_idx, ch, dual_vals[ch],
+                        lf ? "TRIP" : "ok", screen_configs[screen_idx].min[ch][1],
+                        hf ? "TRIP" : "ok", screen_configs[screen_idx].max[ch][2]);
+                    last_alarm_log_time = now_buz;
+                }
                 trigger_buzzer_alert();
                 last_buzzer_time = now_buz;
                 first_run_buzzer = false;
@@ -641,7 +649,10 @@ static void update_quad_number_display_for_screen(int screen_num) {
         check_quad(bl_value, 1, 1, 2);
         check_quad(br_value, 1, 3, 4);
         if (quad_fired) {
-            Serial.printf("[ALARM QUAD] screen=%d fired\n", screen_idx);
+            if (now_buz - last_alarm_log_time > ALARM_LOG_INTERVAL_MS) {
+                Serial.printf("[ALARM QUAD] screen=%d fired\n", screen_idx);
+                last_alarm_log_time = now_buz;
+            }
             trigger_buzzer_alert();
             last_buzzer_time = now_buz;
             first_run_buzzer = false;
@@ -729,10 +740,13 @@ static void update_gauge_number_display_for_screen(int screen_num) {
         bool lf = la && (center_value < screen_configs[screen_idx].min[1][1]);
         bool hf = ha && (center_value > screen_configs[screen_idx].max[1][2]);
         if ((lf || hf) && (first_run_buzzer || cooldown_ok)) {
-            Serial.printf("[ALARM GNUM] screen=%d center=%.2f low=%s(%.2f) high=%s(%.2f)\n",
-                screen_idx, center_value,
-                lf ? "TRIP" : "ok", screen_configs[screen_idx].min[1][1],
-                hf ? "TRIP" : "ok", screen_configs[screen_idx].max[1][2]);
+            if (now_buz - last_alarm_log_time > ALARM_LOG_INTERVAL_MS) {
+                Serial.printf("[ALARM GNUM] screen=%d center=%.2f low=%s(%.2f) high=%s(%.2f)\n",
+                    screen_idx, center_value,
+                    lf ? "TRIP" : "ok", screen_configs[screen_idx].min[1][1],
+                    hf ? "TRIP" : "ok", screen_configs[screen_idx].max[1][2]);
+                last_alarm_log_time = now_buz;
+            }
             trigger_buzzer_alert();
             last_buzzer_time = now_buz;
             first_run_buzzer = false;
@@ -1435,9 +1449,11 @@ void loop() {
                 unsigned long now = millis();
                 bool cooldown_expired = (now - last_buzzer_time > ALERT_COOLDOWN_MS);
                 if (buzzer_mode == 2 && buz_enabled && (first_run_buzzer || cooldown_expired)) {
-                    // Debug: log buzzer decision
-                    printf("[ALERT] screen=%d gauge=%d chosen_zone=%d val=%.2f buz_enabled=%d first_run=%d cooldown_expired=%d\n",
-                           screen_idx, g, chosen_zone, val, (int)buz_enabled, (int)first_run_buzzer, (int)cooldown_expired);
+                    if (now - last_alarm_log_time > ALARM_LOG_INTERVAL_MS) {
+                        printf("[ALERT] screen=%d gauge=%d chosen_zone=%d val=%.2f buz_enabled=%d first_run=%d cooldown_expired=%d\n",
+                               screen_idx, g, chosen_zone, val, (int)buz_enabled, (int)first_run_buzzer, (int)cooldown_expired);
+                        last_alarm_log_time = now;
+                    }
                     trigger_buzzer_alert();
                     last_buzzer_time = now;
                     first_run_buzzer = false;
@@ -1487,8 +1503,11 @@ void loop() {
                             if (chosen_zone == -1) chosen_zone = 1;
                             bool buz_enabled = (screen_configs[s].buzzer[g][chosen_zone] != 0);
                             if (buz_enabled) {
-                                printf("[ALERT-GLOBAL] screen=%d gauge=%d chosen_zone=%d val=%.2f buz_enabled=%d\n",
-                                       s, g, chosen_zone, rval, (int)buz_enabled);
+                                if (now - last_alarm_log_time > ALARM_LOG_INTERVAL_MS) {
+                                    printf("[ALERT-GLOBAL] screen=%d gauge=%d chosen_zone=%d val=%.2f buz_enabled=%d\n",
+                                           s, g, chosen_zone, rval, (int)buz_enabled);
+                                    last_alarm_log_time = now;
+                                }
                                 trigger_buzzer_alert();
                                 last_buzzer_time = now;
                                 first_run_buzzer = false;

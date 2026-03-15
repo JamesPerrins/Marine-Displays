@@ -52,5 +52,5 @@ void Set_Toggle(uint8_t Pin);                               // Flip the level of
 /********************************************************* TCA9554PWR Initializes the device ***********************************************************/  
 void TCA9554PWR_Init(uint8_t PinState = 0x00);              // Set the seven pins to PinState state, for example :PinState=0x23, 0010 0011 State (the highest bit is not used) (Output mode or input mode) 0= Output mode 1= Input mode. The default value is output mode
 
-bool detect_expander_address();                             // Probe I2C bus to detect v3 (0x20) or v4 (0x24) expander
+bool detect_expander_address();                             // Auto-detect board version (probe once, cache in NVS)
 bool is_board_v4();                                         // Returns true if v4 board detected

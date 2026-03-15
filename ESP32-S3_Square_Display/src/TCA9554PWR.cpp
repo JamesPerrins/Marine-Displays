@@ -1,5 +1,9 @@
 #include "TCA9554PWR.h"
 #include <Arduino.h>
+#include <Preferences.h>
+
+// ets_printf writes to hardware UART0 even before USB CDC Serial is up
+extern "C" int ets_printf(const char *fmt, ...);
 
 // Runtime I2C address for the IO expander (default v3=0x20, v4=0x24)
 uint8_t g_tca9554_address = TCA9554_ADDR_V3;
@@ -7,26 +11,66 @@ static bool g_board_v4 = true;
 
 bool detect_expander_address()
 {
-  // Probe v3 address (0x20) first
-  Wire.beginTransmission(TCA9554_ADDR_V3);
-  if (Wire.endTransmission() == 0) {
+  // Check NVS for a cached board version from a previous successful probe.
+  // If found, skip I2C probing (which can leave the expander in a bad state
+  // on v4 boards and crash the display).
+  Preferences prefs;
+  uint8_t cached = 0xFF; // 0xFF = not yet probed
+  if (prefs.begin("settings", true)) {
+    cached = prefs.getUChar("board_ver", 0xFF);
+    prefs.end();
+  }
+
+  if (cached == 0) {
     g_tca9554_address = TCA9554_ADDR_V3;
     g_board_v4 = false;
-    Serial.println("[BOARD] Detected v3 IO expander at 0x20");
+    ets_printf("[BOARD] Cached: v3 (expander 0x20)\r\n");
     return true;
   }
-  // Probe v4 address (0x24)
-  Wire.beginTransmission(TCA9554_ADDR_V4);
-  if (Wire.endTransmission() == 0) {
+  if (cached == 1) {
     g_tca9554_address = TCA9554_ADDR_V4;
     g_board_v4 = true;
-    Serial.println("[BOARD] Detected v4 IO expander at 0x24");
+    ets_printf("[BOARD] Cached: v4 (expander 0x24)\r\n");
     return true;
   }
-  Serial.println("[BOARD] WARNING: No IO expander found at 0x20 or 0x24, defaulting to 0x20");
-  g_tca9554_address = TCA9554_ADDR_V3;
-  g_board_v4 = false;
-  return false;
+
+  // First boot: probe both addresses to auto-detect.
+  // This may leave the expander in a bad state on v4, but the result is
+  // persisted so it only happens once (display may crash → auto-reboot → cached).
+  ets_printf("[BOARD] First boot: probing I2C for board version...\r\n");
+  Wire.beginTransmission(TCA9554_ADDR_V4);
+  uint8_t err_v4 = Wire.endTransmission();
+  Wire.beginTransmission(TCA9554_ADDR_V3);
+  uint8_t err_v3 = Wire.endTransmission();
+  ets_printf("[BOARD] Probe 0x20 (v3): %s, 0x24 (v4): %s\r\n",
+             err_v3 == 0 ? "ACK" : "NACK",
+             err_v4 == 0 ? "ACK" : "NACK");
+
+  uint8_t detected = 0; // default v3
+  if (err_v4 == 0) {
+    g_tca9554_address = TCA9554_ADDR_V4;
+    g_board_v4 = true;
+    detected = 1;
+    ets_printf("[BOARD] Auto-detected v4 IO expander at 0x24\r\n");
+  } else if (err_v3 == 0) {
+    g_tca9554_address = TCA9554_ADDR_V3;
+    g_board_v4 = false;
+    detected = 0;
+    ets_printf("[BOARD] Auto-detected v3 IO expander at 0x20\r\n");
+  } else {
+    ets_printf("[BOARD] WARNING: No expander found, defaulting to v3 (0x20)\r\n");
+    g_tca9554_address = TCA9554_ADDR_V3;
+    g_board_v4 = false;
+    detected = 0;
+  }
+
+  // Cache the result so we never probe again
+  if (prefs.begin("settings", false)) {
+    prefs.putUChar("board_ver", detected);
+    prefs.end();
+    ets_printf("[BOARD] Cached board_ver=%d to NVS\r\n", detected);
+  }
+  return true;
 }
 
 bool is_board_v4()

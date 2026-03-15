@@ -433,32 +433,35 @@ void ST7701_Init()
 void ST7701_Reset()
 {
   if (is_board_v4()) {
-    // V4 boards use a different reset sequence via the IO expander at 0x24
-    Serial.println("[DISPLAY] ST7701_Reset: v4 board reset via I2C expander at 0x24");
+    // V4 boards use a different reset sequence via the IO expander at 0x24.
+    // Toggles all output pins low→high then sets config=0x3A for proper pin modes.
+    Serial.printf("[DISPLAY] ST7701_Reset: v4 board reset via I2C expander at 0x%02X\n", g_tca9554_address);
     Wire.beginTransmission(TCA9554_ADDR_V4);
-    Wire.write(0x02);
-    Wire.write(0x00);
+    Wire.write(0x02);  // output register
+    Wire.write(0x00);  // all LOW
     Wire.endTransmission();
     delay(20);
 
     Wire.beginTransmission(TCA9554_ADDR_V4);
-    Wire.write(0x02);
-    Wire.write(0xFF);
+    Wire.write(0x02);  // output register
+    Wire.write(0xFF);  // all HIGH
     Wire.endTransmission();
     delay(120);
 
     Wire.beginTransmission(TCA9554_ADDR_V4);
-    Wire.write(0x03);
-    Wire.write(0x3A);
+    Wire.write(0x03);  // config register
+    Wire.write(0x3A);  // v4 pin directions
     Wire.endTransmission();
+    Serial.println("[DISPLAY] ST7701_Reset: v4 done");
   } else {
     // V3 boards: toggle EXIO_PIN3 (expander reset)
-    Serial.println("[DISPLAY] ST7701_Reset: v3 board asserting expander reset (EXIO_PIN3)");
+    Serial.printf("[DISPLAY] ST7701_Reset: v3 board (expander 0x%02X), toggling EXIO_PIN3\n", g_tca9554_address);
     Mode_EXIO(EXIO_PIN3, 0); // 0 = output
     Set_EXIO(EXIO_PIN3, Low);
     vTaskDelay(pdMS_TO_TICKS(20));
     Set_EXIO(EXIO_PIN3, High);
     vTaskDelay(pdMS_TO_TICKS(50));
+    Serial.println("[DISPLAY] ST7701_Reset: v3 done");
   }
 }
 

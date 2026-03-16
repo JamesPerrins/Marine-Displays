@@ -86,8 +86,19 @@ void schedule_signalk_ws_resume();
 extern volatile bool g_signalk_ws_resume_pending;
 // Rebuild and (re)send Signal K subscription list from current configuration
 void refresh_signalk_subscriptions();
+// Populate the internal signalk_paths[] array from stored configuration.
+// Must be called in MQTT mode (where enable_signalk() is never called) so that
+// update_signalk_value() can route incoming topics to the correct gauge slots.
+void load_signalk_paths();
 // Fetch metadata for all configured paths (gauges, number, dual displays)
 void fetch_all_metadata();
+// Route an incoming path+value to the correct sensor slot(s).
+// Safe to call from any task/core; uses the sensor mutex internally.
+// Used by MQTT and any future data sources as a common update entry point.
+void update_signalk_value(const char* path, float value);
+// Returns millis() timestamp of last successful update_signalk_value() call.
+// 0 = no data received yet.
+uint32_t get_last_data_update_ms();
 
 // Enqueue an outgoing message to be sent when WS is connected
 void enqueue_signalk_message(const String &msg);

@@ -14,6 +14,7 @@ bool test_mode = false;
 #include "signalk_config.h"
 #include "screen_config_c_api.h"
 #include "network_setup.h"
+#include "mqtt_config.h"
 #include "gauge_config.h"
 #include "needle_style.h"
 #include "number_display.h"
@@ -43,6 +44,9 @@ bool apply_screen_visuals_for_one(int s);
 #include "driver/spi_master.h"
 
 // External UI elements (per-screen icons are declared in ui_ScreenN.h via ui.h)
+
+// Data freshness indicator dot (on lv_layer_top, always visible above all screens)
+static lv_obj_t* s_data_dot = NULL;
 
 // Animation state tracking
 static int16_t current_needle_angle = 0;
@@ -1250,6 +1254,20 @@ void setup() {
     Serial.println("LVGL and UI initialized");
     Serial.flush();
 
+    // Data freshness dot — top-left corner, above all screens
+    {
+        lv_obj_t* layer = lv_layer_top();
+        s_data_dot = lv_obj_create(layer);
+        lv_obj_set_size(s_data_dot, 18, 18);
+        lv_obj_set_pos(s_data_dot, 8, 8);
+        lv_obj_set_style_radius(s_data_dot, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(s_data_dot, lv_color_hex(0x606060), 0);  // gray = no data yet
+        lv_obj_set_style_bg_opa(s_data_dot, LV_OPA_90, 0);
+        lv_obj_set_style_border_width(s_data_dot, 0, 0);
+        lv_obj_set_style_pad_all(s_data_dot, 0, 0);
+        lv_obj_clear_flag(s_data_dot, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    }
+
     // Try to apply persisted screen visuals at boot. If apply fails (no UI objects yet or no assets),
     // show fallback error screen to help users who haven't uploaded configs or assets.
     bool applied_boot = apply_all_screen_visuals();
@@ -1294,23 +1312,40 @@ void setup() {
         ets_printf("[HEAP] *** CORRUPTION detected AFTER setup_network ***\r\n");
     }
     
-    // Start Signal K only if server is actually configured
-    Serial.println("Checking Signal K configuration...");
+    // Start data source based on configured selection
+    String data_source = get_data_source();
+    Serial.printf("Data source: %s\n", data_source.c_str());
     Serial.flush();
-    String sk_ip = get_signalk_server_ip();
-    Serial.print("Signal K Server IP: '");
-    Serial.print(sk_ip);
-    Serial.println("'");
-    Serial.flush();
-    
-    if (sk_ip.length() > 0 && is_wifi_connected()) {
-        Serial.println("Starting Signal K...");
-        Serial.flush();
-        enable_signalk("", "", sk_ip.c_str(), get_signalk_server_port());
+
+    if (data_source == "mqtt") {
+        // Populate internal SK path array so MQTT topic→gauge routing works
+        load_signalk_paths();
+        String broker = get_mqtt_broker();
+        if (broker.length() > 0 && is_wifi_connected()) {
+            Serial.printf("Starting MQTT — broker=%s port=%u prefix='%s'\n",
+                          broker.c_str(), get_mqtt_port(), get_mqtt_topic_prefix().c_str());
+            Serial.flush();
+            enable_mqtt(broker.c_str(), get_mqtt_port(),
+                        get_mqtt_user().c_str(), get_mqtt_pass().c_str(),
+                        get_mqtt_topic_prefix().c_str());
+        } else {
+            Serial.println("MQTT not started — broker not configured or WiFi not connected");
+            Serial.flush();
+        }
     } else {
-        Serial.println("Signal K not configured yet");
-        Serial.println("Connect to web UI to configure Signal K server");
+        // Default: SignalK WebSocket
+        String sk_ip = get_signalk_server_ip();
+        Serial.printf("Signal K Server IP: '%s'\n", sk_ip.c_str());
         Serial.flush();
+        if (sk_ip.length() > 0 && is_wifi_connected()) {
+            Serial.println("Starting Signal K...");
+            Serial.flush();
+            enable_signalk("", "", sk_ip.c_str(), get_signalk_server_port());
+        } else {
+            Serial.println("Signal K not configured yet");
+            Serial.println("Connect to web UI to configure Signal K server");
+            Serial.flush();
+        }
     }
     
     Serial.println("Display initialized with WiFi optimizations.");
@@ -1665,6 +1700,44 @@ void loop() {
         // stops accessing the config page.
     }
 
+    // Data freshness indicator: update dot colour + blink continuously
+    if (s_data_dot) {
+        enum DotState : uint8_t { DS_NEVER, DS_FLASH, DS_LIVE, DS_STALE };
+        static DotState last_dot_state = DS_NEVER;
+        static uint32_t last_blink_ms  = 0;
+        static bool     blink_on       = true;
+
+        uint32_t last_upd = get_last_data_update_ms();
+        uint32_t now_ms   = (uint32_t)millis();
+
+        DotState state;
+        if (last_upd == 0) {
+            state = DS_NEVER;
+        } else {
+            uint32_t age = now_ms - last_upd;
+            if      (age <   500) state = DS_FLASH;
+            else if (age < 30000) state = DS_LIVE;
+            else                  state = DS_STALE;
+        }
+        if (state != last_dot_state) {
+            lv_color_t col;
+            switch (state) {
+                case DS_FLASH: col = lv_color_hex(0x00FF40); break;  // bright green
+                case DS_LIVE:  col = lv_color_hex(0x00A030); break;  // green - live
+                case DS_STALE: col = lv_color_hex(0xFF2020); break;  // red - stale
+                default:       col = lv_color_hex(0x606060); break;  // gray - never
+            }
+            lv_obj_set_style_bg_color(s_data_dot, col, 0);
+            last_dot_state = state;
+        }
+        // Blink: toggle opacity every 500ms regardless of state
+        if (now_ms - last_blink_ms >= 500) {
+            blink_on = !blink_on;
+            last_blink_ms = now_ms;
+            lv_obj_set_style_bg_opa(s_data_dot, blink_on ? LV_OPA_90 : LV_OPA_20, 0);
+        }
+    }
+
     Lvgl_Loop();
 
     // WS idle watchdog: resume WS automatically once the config page has been
@@ -1681,10 +1754,11 @@ void loop() {
                     && !g_signalk_ws_resume_pending
                     && g_config_page_last_seen != 0
                     && (now_wd - g_config_page_last_seen) >= 10000UL) {
-                Serial.printf("[SK] Config page idle >10s (iRAM=%u), auto-resuming WS\n",
+                Serial.printf("[SK] Config page idle >10s (iRAM=%u), auto-resuming\n",
                               heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
                 g_config_page_last_seen = 0;
                 resume_signalk_ws();
+                resume_mqtt();
             }
         }
     }

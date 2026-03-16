@@ -10,6 +10,31 @@
 #include <esp_heap_caps.h>
 #include <map>
 
+// ── mbedTLS PSRAM allocator (linker-wrap) ────────────────────────────────────
+// Internal mbedTLS code calls esp_mbedtls_mem_calloc() directly via
+// MBEDTLS_PLATFORM_CALLOC_MACRO — bypassing mbedtls_platform_set_calloc_free().
+// Wrapping esp_mbedtls_mem_calloc at link time intercepts ALL mbedTLS heap
+// allocations, including in the pre-compiled libmbedcrypto.a.
+// Blocks ≥4KB (the two 16KB SSL record buffers) go to PSRAM, leaving the ~30KB
+// iRAM for SSL context structs and certificate chain parsing.
+// Build flags: -Wl,--wrap=esp_mbedtls_mem_calloc -Wl,--wrap=esp_mbedtls_mem_free
+extern "C" void* __real_esp_mbedtls_mem_calloc(size_t n, size_t size);
+extern "C" void  __real_esp_mbedtls_mem_free(void* ptr);
+
+extern "C" void* __wrap_esp_mbedtls_mem_calloc(size_t n, size_t size) {
+    size_t total = n * size;
+    if (total >= 4096) {
+        void* p = heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (p) return p;
+    }
+    return __real_esp_mbedtls_mem_calloc(n, size);
+}
+
+extern "C" void __wrap_esp_mbedtls_mem_free(void* ptr) {
+    heap_caps_free(ptr);
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 // Custom ArduinoJson allocator that uses PSRAM instead of internal RAM.
 // Saves ~4 KB of iRAM on every SK WebSocket message parse.
 struct PsramAllocator {
@@ -59,6 +84,7 @@ static std::map<String, String> extended_sensor_descriptions;
 static WebSocketsClient ws_client;
 static String server_ip_str = "";
 static uint16_t server_port_num = 0;
+static bool use_ssl = false;
 static String signalk_paths[TOTAL_PARAMS];  // Array of 10 paths
 static TaskHandle_t signalk_task_handle = NULL;
 static bool signalk_enabled = false;
@@ -66,10 +92,19 @@ static bool signalk_enabled = false;
 // signalk_task (Core 0) sees this, disconnects the WS, and suspends reconnects
 // until the flag is cleared on save — freeing the ~22KB WS receive buffer.
 static volatile bool g_signalk_ws_paused = false;
+// Persistent buffer for setExtraHeaders — must outlive ws_connect() so the
+// WebSocket library can safely read it when sending the HTTP upgrade request.
+static String ws_extra_headers;
 
 // Set by resume_signalk_ws() to tell signalk_task to reconnect once iRAM > 18KB.
 // signalk_task clears both this and g_signalk_ws_paused when the threshold is met.
 static volatile bool g_signalk_ws_resume_when_ready = false;
+
+// Timestamp (millis) of the most recent successful data update.
+// 0 = no data ever received.  Read from any task via get_last_data_update_ms().
+static volatile uint32_t s_last_any_update_ms = 0;
+
+uint32_t get_last_data_update_ms() { return s_last_any_update_ms; }
 
 // Connection health and reconnection/backoff state
 static unsigned long last_message_time = 0;
@@ -451,14 +486,16 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
                     for (int i = 0; i < TOTAL_PARAMS; i++) {
                         if (signalk_paths[i].length() > 0 && signalk_paths[i].equals(path)) {
                             set_sensor_value(i, value);
+                            s_last_any_update_ms = (uint32_t)millis();
                             found_in_gauge = true;
                             // Don't break - continue to update ALL matching path indices
                         }
                     }
-                    
+
                     // If not in gauge paths, store in extended map (for number/dual displays)
                     if (!found_in_gauge && sensor_mutex != NULL && xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(50))) {
                         extended_sensor_values[String(path)] = value;
+                        s_last_any_update_ms = (uint32_t)millis();
                         xSemaphoreGive(sensor_mutex);
                     }
                 }
@@ -531,9 +568,24 @@ static void signalk_task(void *parameter) {
                 next_reconnect_at = now + current_backoff_ms;
             }
             if (now >= next_reconnect_at) {
-                // re-init client
-                ws_client.begin(server_ip_str.c_str(), server_port_num, "/signalk/v1/stream");
+                // re-init client (SSL-aware)
+                ws_client.disconnect();
+                if (use_ssl) {
+                    ws_client.beginSSL(server_ip_str.c_str(), server_port_num, "/signalk/v1/stream?subscribe=none");
+                } else {
+                    ws_client.begin(server_ip_str.c_str(), server_port_num, "/signalk/v1/stream?subscribe=none");
+                }
                 ws_client.onEvent(wsEvent);
+                ws_client.setReconnectInterval(0);
+                String origin = String(use_ssl ? "https://" : "http://") + server_ip_str;
+                ws_extra_headers = "Origin: " + origin;
+                String cf_id = get_cf_client_id();
+                String cf_secret = get_cf_client_secret();
+                if (cf_id.length() > 0 && cf_secret.length() > 0) {
+                    ws_extra_headers += "\r\nCF-Access-Client-Id: " + cf_id;
+                    ws_extra_headers += "\r\nCF-Access-Client-Secret: " + cf_secret;
+                }
+                ws_client.setExtraHeaders(ws_extra_headers.c_str());
                 last_reconnect_attempt = now;
                 // schedule next if this fails
                 unsigned int jitter = (esp_random() & 0x7FF) % 1000;
@@ -559,35 +611,60 @@ void enable_signalk(const char* ssid, const char* password, const char* server_i
     signalk_enabled = true;
     server_ip_str = server_ip;
     server_port_num = server_port;
-    
+    use_ssl = (server_port == 443);
+
     // Get all paths from configuration including gauges, number displays, and dual displays
     std::vector<String> all_paths = get_all_signalk_paths();
-    
+
     // First, load the traditional gauge paths into signalk_paths array
     for (int i = 0; i < TOTAL_PARAMS; i++) {
         signalk_paths[i] = get_signalk_path_by_index(i);
     }
-    
+
     // Initialize mutex first
     init_sensor_mutex();
     // create ws queue mutex
     if (ws_queue_mutex == NULL) {
         ws_queue_mutex = xSemaphoreCreateMutex();
     }
-    
+
     // WiFi should already be connected from setup_sensESP()
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("Signal K: WiFi not connected, aborting");
         signalk_enabled = false;
         return;
     }
-    Serial.println("Signal K: Starting WebSocket client...");
+    Serial.printf("Signal K: Starting WebSocket client (use_ssl=%d)...\n", (int)use_ssl);
 
-    // Initialize websocket client
-    ws_client.begin(server_ip_str.c_str(), server_port_num, "/signalk/v1/stream");
+    // Initialize websocket client (SSL-aware)
+    ws_client.disconnect();
+    if (use_ssl) {
+        // NULL CA cert + NULL fingerprint causes the library to call setInsecure()
+        // internally, accepting self-signed/Cloudflare certificates.
+        ws_client.beginSSL(server_ip_str.c_str(), server_port_num, "/signalk/v1/stream?subscribe=none");
+        Serial.println("Signal K: connecting via WSS (SSL)");
+    } else {
+        ws_client.begin(server_ip_str.c_str(), server_port_num, "/signalk/v1/stream?subscribe=none");
+        Serial.println("Signal K: connecting via WS (plain)");
+    }
     ws_client.onEvent(wsEvent);
     // We'll manage reconnection with backoff ourselves
     ws_client.setReconnectInterval(0);
+    // Build extra headers: Origin always, plus CF Access tokens if configured.
+    // ws_extra_headers is file-scope static so the pointer stays valid after
+    // enable_signalk() returns — the WebSocket library reads it lazily on loop().
+    {
+        String origin = String(use_ssl ? "https://" : "http://") + server_ip_str;
+        ws_extra_headers = "Origin: " + origin;
+        String cf_id = get_cf_client_id();
+        String cf_secret = get_cf_client_secret();
+        if (cf_id.length() > 0 && cf_secret.length() > 0) {
+            ws_extra_headers += "\r\nCF-Access-Client-Id: " + cf_id;
+            ws_extra_headers += "\r\nCF-Access-Client-Secret: " + cf_secret;
+            Serial.println("Signal K: CF Access headers added");
+        }
+        ws_client.setExtraHeaders(ws_extra_headers.c_str());
+    }
 
     // Create task to pump ws loop.
     // NOTE: xTaskCreateStaticPinnedToCore with a PSRAM stack fails with
@@ -706,6 +783,39 @@ void refresh_signalk_subscriptions() {
     // from two cores simultaneously is an unprotected race that crashes the device.
     // flush_outgoing() inside signalk_task will drain the queue safely from Core 0.
     enqueue_outgoing(out);
+}
+
+// Populate signalk_paths[] from stored configuration without starting the WS task.
+// Call this in MQTT mode after load_preferences() so update_signalk_value() can
+// route incoming topics to the correct gauge slots.
+void load_signalk_paths() {
+    for (int i = 0; i < TOTAL_PARAMS; i++) {
+        signalk_paths[i] = get_signalk_path_by_index(i);
+    }
+}
+
+// Route an incoming path+value to the correct sensor slot(s).
+// Called by the MQTT callback and can also be used by any future data source.
+// Thread-safe: uses sensor_mutex for extended map writes.
+void update_signalk_value(const char* path, float value) {
+    if (!path || path[0] == '\0') return;
+    // Always stamp the timestamp — MQTT populates the extended map only,
+    // so we must update before the gauge-match loop, not inside it.
+    s_last_any_update_ms = (uint32_t)millis();
+    bool found_in_gauge = false;
+    for (int i = 0; i < TOTAL_PARAMS; i++) {
+        if (signalk_paths[i].length() > 0 && signalk_paths[i].equals(path)) {
+            set_sensor_value(i, value);
+            found_in_gauge = true;
+        }
+    }
+    if (!found_in_gauge) {
+        // Store in extended map for number/dual/quad display types
+        if (sensor_mutex != NULL && xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(50))) {
+            extended_sensor_values[String(path)] = value;
+            xSemaphoreGive(sensor_mutex);
+        }
+    }
 }
 
 

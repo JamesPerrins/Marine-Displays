@@ -53,6 +53,22 @@ String get_signalk_server_ip();
 // Get configured Signal K port
 uint16_t get_signalk_server_port();
 
+// Get Cloudflare Access credentials (empty strings if not configured)
+String get_cf_client_id();
+String get_cf_client_secret();
+
+// Get configured data source ("signalk" or "mqtt")
+String get_data_source();
+
+// Get MQTT broker settings
+String   get_mqtt_broker();
+uint16_t get_mqtt_port();
+String   get_mqtt_user();
+String   get_mqtt_pass();
+// Topic prefix stripped before SK path matching (e.g. "vessels/self")
+// Empty string = subscribe to all topics (#)
+String   get_mqtt_topic_prefix();
+
 // Get/set configured Signal K path by index (0-9)
 String get_signalk_path_by_index(int index);
 void set_signalk_path_by_index(int index, const String& path);

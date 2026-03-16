@@ -17,15 +17,11 @@ bool I2C_Read_Touch(uint8_t Driver_addr, uint16_t Reg_addr, uint8_t *Reg_data, u
   Wire.write((uint8_t)(Reg_addr >> 8)); 
   Wire.write((uint8_t)Reg_addr);         
   if ( Wire.endTransmission(true)){
-<<<<<<< HEAD
-    if (!is_board_v4()) {printf("The I2C transmission fails. - I2C Read\r\n");}
-=======
     unsigned long now = millis();
     if (now - last_i2c_err_log >= I2C_ERR_LOG_INTERVAL_MS) {
       last_i2c_err_log = now;
       printf("[TOUCH] I2C Read failed (addr=0x%02X, reg=0x%04X)\r\n", Driver_addr, Reg_addr);
     }
->>>>>>> c2769b328ba978b04bc4eaad034fb8b3cc085b8f
     return false;
   }
   Wire.requestFrom(Driver_addr, Length);
@@ -44,15 +40,11 @@ bool I2C_Write_Touch(uint8_t Driver_addr, uint16_t Reg_addr, const uint8_t *Reg_
   }
   if ( Wire.endTransmission(true))
   {
-<<<<<<< HEAD
-    if (!is_board_v4()) {printf("The I2C transmission fails. - I2C Write\r\n");}
-=======
     unsigned long now = millis();
     if (now - last_i2c_err_log >= I2C_ERR_LOG_INTERVAL_MS) {
       last_i2c_err_log = now;
       printf("[TOUCH] I2C Write failed (addr=0x%02X, reg=0x%04X)\r\n", Driver_addr, Reg_addr);
     }
->>>>>>> c2769b328ba978b04bc4eaad034fb8b3cc085b8f
     return false;
   }
   return true;

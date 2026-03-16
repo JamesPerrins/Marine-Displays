@@ -24,7 +24,8 @@ typedef enum {
 	DISPLAY_TYPE_GAUGE_NUMBER = 4,// Gauge (top) + Number (center)
         DISPLAY_TYPE_GRAPH = 5,       // LVGL chart/graph display
         DISPLAY_TYPE_COMPASS = 6,     // Rotating compass display (heading)
-        DISPLAY_TYPE_POSITION = 7     // Lat/Lon + UTC time display
+        DISPLAY_TYPE_POSITION = 7,    // Lat/Lon + UTC time display
+        DISPLAY_TYPE_AIS = 8          // AIS radar display
 } DisplayType;
 
 // Number display background type (uses bg_image field)

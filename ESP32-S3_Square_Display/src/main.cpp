@@ -6,6 +6,7 @@ bool test_mode = false;
 #include "I2C_Driver.h"
 #include "TCA9554PWR.h"
 #include "Display_ST7701.h"
+#include "Touch_GT911.h"
 #include "LVGL_Driver.h"
 #include "SD_Card.h"
 #include "ui.h"
@@ -22,6 +23,7 @@ bool test_mode = false;
 #include "graph_display.h"
 #include "position_display.h"
 #include "compass_display.h"
+#include "ais_display.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -896,6 +898,19 @@ extern "C" void update_needles_for_screen(int screen_num) {
         compass_display_update_bl(screen_idx, bl_val, bl_unit.c_str(), bl_desc.c_str());
         compass_display_update_br(screen_idx, br_val, br_unit.c_str(), br_desc.c_str());
         return;
+    } else if (screen_configs[screen_idx].display_type == DISPLAY_TYPE_AIS) {
+        // AIS radar display — fetch targets from Signal K REST API, then redraw
+        String sk_ip = get_signalk_server_ip();
+        uint16_t sk_port = get_signalk_server_port();
+        ais_fetch_targets(sk_ip.c_str(), sk_port);
+        // Own-boat nav data: COG/SOG from Signal K (radians/m→s → degrees/knots)
+        float own_cog_rad = get_sensor_value_by_path("navigation.courseOverGroundTrue");
+        float own_sog_ms  = get_sensor_value_by_path("navigation.speedOverGround");
+        float own_cog = isnan(own_cog_rad) ? NAN : own_cog_rad * (180.0f / (float)M_PI);
+        float own_sog = isnan(own_sog_ms)  ? NAN : own_sog_ms * 1.94384f;
+        ais_display_update(screen_idx, (float)g_nav_latitude, (float)g_nav_longitude,
+                           own_cog, own_sog);
+        return;
     }
     
     // If test mode is active, skip all live data updates
@@ -1154,11 +1169,30 @@ void setup() {
     ets_printf("*** LCD_Init start ***\r\n");
     LCD_Init();
     ets_printf("*** LCD_Init done ***\r\n");
-    // LCD_Init calls esp_io_expander_new_i2c_tca9554 which resets CONFIG=0xFF (all inputs).
-    // Re-assert PIN6 LOW (buzzer OFF) and all-outputs immediately after display init.
+    // The io_expander library now preserves hardware register state, but
+    // re-assert PIN6 LOW (buzzer OFF) and all-outputs as a safety net.
     Set_EXIOS(Read_EXIOS(TCA9554_OUTPUT_REG) & (uint8_t)~(1 << (EXIO_PIN6 - 1)));
     Mode_EXIOS(0x00);
     Set_EXIO(EXIO_PIN6, Low);
+
+    // Heap integrity check — narrow down PSRAM corruption source
+    if (!heap_caps_check_integrity_all(true)) {
+        ets_printf("[HEAP] *** CORRUPTION detected AFTER LCD_Init ***\r\n");
+    } else {
+        ets_printf("[HEAP] OK after LCD_Init (PSRAM free=%u)\r\n",
+                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    }
+
+    // Initialize GT911 touch controller: reset with INT=LOW to force address 0x5D,
+    // auto-detect address (v3=0x5D, v4 may be 0x14), read config, attach interrupt.
+    Touch_Init();
+    Serial.println("Touch controller initialized");
+    Serial.flush();
+
+    // Heap integrity check after touch init
+    if (!heap_caps_check_integrity_all(true)) {
+        ets_printf("[HEAP] *** CORRUPTION detected AFTER Touch_Init ***\r\n");
+    }
 
     // Stage 3: Full SD re-init now that the display has finished taking the SPI pins
     Serial.println("SD: now performing SD_MMC.begin('/sdcard', true) after display init");
@@ -1197,6 +1231,14 @@ void setup() {
 
     // LVGL
     Lvgl_Init();
+
+    // Heap integrity check after LVGL init (allocates large PSRAM buffers + DMA)
+    if (!heap_caps_check_integrity_all(true)) {
+        ets_printf("[HEAP] *** CORRUPTION detected AFTER Lvgl_Init ***\r\n");
+    } else {
+        ets_printf("[HEAP] OK after Lvgl_Init (PSRAM free=%u)\r\n",
+                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    }
 
     // Initialize RGB565 binary image decoder (fast loading, no PNG decode overhead)
     rgb565_decoder_init();
@@ -1246,6 +1288,11 @@ void setup() {
     setup_network();
     Serial.println("WiFi setup complete");
     Serial.flush();
+
+    // Heap integrity check after WiFi/network init
+    if (!heap_caps_check_integrity_all(true)) {
+        ets_printf("[HEAP] *** CORRUPTION detected AFTER setup_network ***\r\n");
+    }
     
     // Start Signal K only if server is actually configured
     Serial.println("Checking Signal K configuration...");

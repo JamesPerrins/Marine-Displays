@@ -9,6 +9,7 @@
 #include "graph_display.h"
 #include "compass_display.h"
 #include "position_display.h"
+#include "ais_display.h"
 #include <lvgl.h>
 #include "esp_log.h"
 #include <Arduino.h>
@@ -340,8 +341,22 @@ bool apply_screen_visuals_for_one(int s) {
             graph_display_destroy(s);
             compass_display_destroy(s);
             mark_compass_display_destroyed(s + 1);
+            ais_display_destroy(s);
             position_display_create(s);
             mark_position_display_created(s + 1);
+            any = true;
+        } else if (screen_configs[s].display_type == DISPLAY_TYPE_AIS) {
+            Serial.printf("[APPLY_ONE] s=%d → AIS\n", s);
+            number_display_destroy(s);
+            dual_number_display_destroy(s);
+            quad_number_display_destroy(s);
+            gauge_number_display_destroy(s);
+            graph_display_destroy(s);
+            compass_display_destroy(s);
+            mark_compass_display_destroyed(s + 1);
+            position_display_destroy(s);
+            mark_position_display_destroyed(s + 1);
+            ais_display_create(s);
             any = true;
         } else {
             // DISPLAY_TYPE_GAUGE (default) — destroy all non-gauge overlays and restore needles
@@ -355,6 +370,7 @@ bool apply_screen_visuals_for_one(int s) {
             mark_compass_display_destroyed(s + 1);
             position_display_destroy(s);
             mark_position_display_destroyed(s + 1);
+            ais_display_destroy(s);
             // Restore upper needle visibility (was hidden when switching away from GAUGE)
             lv_obj_t *upper_needle = get_upper_needle_obj_for_screen(s);
             if (upper_needle) lv_obj_clear_flag(upper_needle, LV_OBJ_FLAG_HIDDEN);

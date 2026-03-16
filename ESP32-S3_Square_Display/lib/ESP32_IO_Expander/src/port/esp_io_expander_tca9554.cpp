@@ -141,8 +141,36 @@ static esp_err_t read_direction_reg(esp_io_expander_handle_t handle, uint32_t *v
 
 static esp_err_t reset(esp_io_expander_t *handle)
 {
-    ESP_RETURN_ON_ERROR(write_direction_reg(handle, DIR_REG_DEFAULT_VAL), TAG, "Write dir reg failed");
-    ESP_RETURN_ON_ERROR(write_output_reg(handle, OUT_REG_DEFAULT_VAL), TAG, "Write output reg failed");
+    // Read current register state instead of writing power-on defaults.
+    // This preserves any pin configuration (direction, output levels) set
+    // before this library was initialised — in particular the buzzer-off
+    // state set by TCA9554PWR_Init() during early boot.  Writing the
+    // defaults (DIR=0xFF all-inputs) would briefly float PIN6 (buzzer),
+    // causing an audible glitch on every boot.
+    esp_io_expander_tca9554_t *tca = (esp_io_expander_tca9554_t *)__containerof(handle, esp_io_expander_tca9554_t, base);
+
+    // Read direction register
+    Wire.beginTransmission((uint8_t)tca->i2c_address);
+    Wire.write(DIRECTION_REG_ADDR);
+    if (Wire.endTransmission() != 0 || Wire.requestFrom((uint8_t)tca->i2c_address, (uint8_t)1) < 1) {
+        ESP_LOGW(TAG, "Reset: failed to read direction reg, using defaults");
+        tca->regs.direction = DIR_REG_DEFAULT_VAL;
+        tca->regs.output    = OUT_REG_DEFAULT_VAL;
+        return ESP_OK;
+    }
+    tca->regs.direction = (uint8_t)Wire.read();
+
+    // Read output register
+    Wire.beginTransmission((uint8_t)tca->i2c_address);
+    Wire.write(OUTPUT_REG_ADDR);
+    if (Wire.endTransmission() != 0 || Wire.requestFrom((uint8_t)tca->i2c_address, (uint8_t)1) < 1) {
+        ESP_LOGW(TAG, "Reset: failed to read output reg, using defaults");
+        tca->regs.output = OUT_REG_DEFAULT_VAL;
+        return ESP_OK;
+    }
+    tca->regs.output = (uint8_t)Wire.read();
+
+    ESP_LOGI(TAG, "Reset: cached dir=0x%02x out=0x%02x (hardware preserved)", tca->regs.direction, tca->regs.output);
     return ESP_OK;
 }
 

@@ -848,8 +848,8 @@ void handle_gauges_page() {
     html += "function toggleGaugeConfig(screen){\n";
     html += "  var sel=document.getElementById('displaytype_'+screen);\n";
     html += "  if(!sel) return;\n";
-    html += "  var divIds=['gaugeconfig','numberconfig','dualconfig','quadconfig','gaugenumconfig','graphconfig','compassconfig','positionconfig'];\n";
-    html += "  var typeMap={'0':['gaugeconfig'],'1':['numberconfig'],'2':['dualconfig'],'3':['quadconfig'],'4':['gaugeconfig','gaugenumconfig'],'5':['graphconfig'],'6':['compassconfig'],'7':['positionconfig']};\n";
+    html += "  var divIds=['gaugeconfig','numberconfig','dualconfig','quadconfig','gaugenumconfig','graphconfig','compassconfig','positionconfig','aisconfig'];\n";
+    html += "  var typeMap={'0':['gaugeconfig'],'1':['numberconfig'],'2':['dualconfig'],'3':['quadconfig'],'4':['gaugeconfig','gaugenumconfig'],'5':['graphconfig'],'6':['compassconfig'],'7':['positionconfig'],'8':['aisconfig']};\n";
     html += "  var show=typeMap[sel.value]||[];\n";
     html += "  divIds.forEach(function(d){\n";
     html += "    var el=document.getElementById(d+'_'+screen);\n";
@@ -867,7 +867,7 @@ void handle_gauges_page() {
 
     html += "function toggleBgImageColor(screen){\n";
     html += "  var sel=document.getElementById('bg_image_'+screen);\n";
-    html += "  ['number_bg_color_div_','dual_bg_color_div_','graph_bg_color_div_','pos_bg_color_div_'].forEach(function(p){\n";
+    html += "  ['number_bg_color_div_','dual_bg_color_div_','graph_bg_color_div_','pos_bg_color_div_','ais_bg_color_div_'].forEach(function(p){\n";
     html += "    var d=document.getElementById(p+screen);\n";
     html += "    if(sel&&d) d.style.display=(sel.value==='Custom Color'?'block':'none');\n";
     html += "  });\n";
@@ -998,8 +998,8 @@ void handle_gauges_screen() {
 
     // Display Type dropdown
     html += "<div style='margin-bottom:16px;'><label>Display Type: <select name='displaytype_" + String(s) + "' id='displaytype_" + String(s) + "' onchange='toggleGaugeConfig(" + String(s) + ")'>";
-    const char* dtNames[] = {"Gauge","Number","Dual","Quad","Gauge + Number","Graph","Compass","Position"};
-    for (int dt = 0; dt < 8; ++dt) {
+    const char* dtNames[] = {"Gauge","Number","Dual","Quad","Gauge + Number","Graph","Compass","Position","AIS"};
+    for (int dt = 0; dt < 9; ++dt) {
         html += "<option value='" + String(dt) + "'";
         if (screen_configs[s].display_type == dt) html += " selected";
         html += ">" + String(dtNames[dt]) + "</option>";
@@ -1342,6 +1342,23 @@ void handle_gauges_screen() {
     html += "<div id='pos_bg_color_div_" + String(s) + "' style='margin-bottom:8px;display:" + String(isCustomColorPos ? "block" : "none") + ";'>";
     html += "<label>Background Colour: <input name='pos_bg_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].number_bg_color[0] ? screen_configs[s].number_bg_color : "#000000") + "'></label></div>";
     html += "</div>"; // close positionconfig
+    flushHtml();
+
+    // ── AIS Display config ───────────────────────────────────────────
+    html += "<div id='aisconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == 8 ? "block" : "none") + ";'>";
+    html += "<h4>AIS Radar Settings</h4>";
+    html += "<div style='margin-bottom:8px;'><label>Range: <select name='ais_range_" + String(s) + "'>";
+    const char* aisRangeNames[] = {"0.5 NM","1 NM","2 NM","5 NM","10 NM","20 NM"};
+    for (int ar = 0; ar < 6; ar++) {
+        html += "<option value='" + String(ar) + "'";
+        if (screen_configs[s].graph_time_range == ar) html += " selected";
+        html += ">" + String(aisRangeNames[ar]) + "</option>";
+    }
+    html += "</select></label></div>";
+    bool isCustomColorAis = (String(screen_configs[s].background_path) == "Custom Color");
+    html += "<div id='ais_bg_color_div_" + String(s) + "' style='margin-bottom:8px;display:" + String(isCustomColorAis ? "block" : "none") + ";'>";
+    html += "<label>Background Colour: <input name='ais_bg_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].number_bg_color[0] ? screen_configs[s].number_bg_color : "#001020") + "'></label></div>";
+    html += "</div>"; // close aisconfig
     flushHtml();
 
     config_server.sendContent(""); // chunked terminator
@@ -1694,6 +1711,20 @@ void handle_save_gauges() {
                     String posBgColorKey = "pos_bg_color_" + String(s);
                     if (screen_configs[s].display_type == DISPLAY_TYPE_POSITION && config_server.hasArg(posBgColorKey)) {
                         strncpy(screen_configs[s].number_bg_color, config_server.arg(posBgColorKey).c_str(), 7);
+                        screen_configs[s].number_bg_color[7] = '\0';
+                    }
+
+                    // AIS range — only apply for AIS screens to avoid overwriting
+                    // graph_time_range on non-AIS screens.
+                    String aisRangeKey = "ais_range_" + String(s);
+                    if (screen_configs[s].display_type == DISPLAY_TYPE_AIS && config_server.hasArg(aisRangeKey)) {
+                        screen_configs[s].graph_time_range = (uint8_t)config_server.arg(aisRangeKey).toInt();
+                    }
+
+                    // AIS background colour — only apply for AIS screens
+                    String aisBgColorKey = "ais_bg_color_" + String(s);
+                    if (screen_configs[s].display_type == DISPLAY_TYPE_AIS && config_server.hasArg(aisBgColorKey)) {
+                        strncpy(screen_configs[s].number_bg_color, config_server.arg(aisBgColorKey).c_str(), 7);
                         screen_configs[s].number_bg_color[7] = '\0';
                     }
                 }
@@ -2366,16 +2397,15 @@ std::vector<String> get_all_signalk_paths() {
         }
     }
 
-    // Add navigation.position and navigation.datetime if any screen uses Position display
+    // Add navigation.position and navigation.datetime if any screen uses Position or AIS display
     {
-        bool has_position_screen = false;
+        bool needs_nav = false;
+        bool needs_cog_sog = false;
         for (int s = 0; s < NUM_SCREENS; s++) {
-            if (screen_configs[s].display_type == DISPLAY_TYPE_POSITION) {
-                has_position_screen = true;
-                break;
-            }
+            if (screen_configs[s].display_type == DISPLAY_TYPE_POSITION) needs_nav = true;
+            if (screen_configs[s].display_type == DISPLAY_TYPE_AIS) { needs_nav = true; needs_cog_sog = true; }
         }
-        if (has_position_screen) {
+        if (needs_nav) {
             String nav_pos = "navigation.position";
             if (unique_paths.find(nav_pos) == unique_paths.end()) {
                 unique_paths.insert(nav_pos);
@@ -2385,6 +2415,18 @@ std::vector<String> get_all_signalk_paths() {
             if (unique_paths.find(nav_dt) == unique_paths.end()) {
                 unique_paths.insert(nav_dt);
                 all_paths.push_back(nav_dt);
+            }
+        }
+        if (needs_cog_sog) {
+            String nav_cog = "navigation.courseOverGroundTrue";
+            if (unique_paths.find(nav_cog) == unique_paths.end()) {
+                unique_paths.insert(nav_cog);
+                all_paths.push_back(nav_cog);
+            }
+            String nav_sog = "navigation.speedOverGround";
+            if (unique_paths.find(nav_sog) == unique_paths.end()) {
+                unique_paths.insert(nav_sog);
+                all_paths.push_back(nav_sog);
             }
         }
     }

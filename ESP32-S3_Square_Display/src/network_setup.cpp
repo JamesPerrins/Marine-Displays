@@ -47,14 +47,24 @@ extern "C" void show_fallback_error_screen_if_needed() {
             }
         }
     }
-    if (all_default) {
+    if (all_default && !g_error_screen_active) {
         Serial.println("[ERROR] All screen configs are default/blank. Showing fallback error screen.");
         g_error_screen_active = true;
         #ifdef LVGL_H
+        // Do NOT call lv_obj_clean() — that frees the global UI object pointers
+        // (ui_TopIcon1, ui_Needle, etc.) while loop() continues to use them,
+        // causing dangling-pointer PSRAM heap corruption via _ui_apply_icon_style.
+        // Create an opaque overlay instead so existing objects stay valid.
         lv_obj_t *scr = lv_scr_act();
-        lv_obj_clean(scr);
-        lv_obj_t *label = lv_label_create(scr);
-        lv_label_set_text(label, "ERROR: No valid config loaded.\nCheck SD card or NVS.");
+        lv_obj_t *overlay = lv_obj_create(scr);
+        lv_obj_set_size(overlay, LV_HOR_RES, LV_VER_RES);
+        lv_obj_set_style_bg_color(overlay, lv_color_black(), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(overlay, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_border_width(overlay, 0, LV_PART_MAIN);
+        lv_obj_align(overlay, LV_ALIGN_CENTER, 0, 0);
+        lv_obj_t *label = lv_label_create(overlay);
+        lv_obj_set_style_text_color(label, lv_color_white(), LV_PART_MAIN);
+        lv_label_set_text(label, "No config loaded.\nConnect to WiFi:\nESP32-SquareDisplay\nThen open 192.168.4.1");
         lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
         #endif
     }
@@ -830,12 +840,52 @@ void handle_gauges_page() {
     html += "</form>";
     html += "<p style='text-align:center;'><a href='/'>Back</a></p>";
     flushHtml();
-    // ── JavaScript — AJAX tab loader, save, toggle ─────────────────
+    // ── JavaScript — AJAX tab loader with caching + background prefetch ──
     html += "<script>\n";
     html += "var NUM_SCREENS=" + String(NUM_SCREENS) + ";\n";
     html += "var currentTab=-1;\n";
+    // tabCache[idx] = fetched HTML string (undefined = not yet fetched)
+    // tabFetching[idx] = true while a request is in-flight
+    html += "var tabCache={};\n";
+    html += "var tabFetching={};\n";
 
-    // showScreenTab: fetch a single screen's config HTML from the device
+    // fetchTab(idx, show): fetch screen idx from server and cache it.
+    // If show=true and the user is still on that tab, inject into the DOM.
+    // After each fetch completes, daisy-chains to the next uncached tab
+    // so all screens are warmed up in the background.
+    html += "function fetchTab(idx,show){\n";
+    html += "  if(tabFetching[idx]) return;\n";
+    html += "  tabFetching[idx]=true;\n";
+    // display=1 only for user-triggered fetches so the physical screen changes
+    html += "  var url='/gauges/screen?s='+idx+(show?'&display=1':'&display=0');\n";
+    html += "  fetch(url)\n";
+    html += "    .then(function(r){return r.text();})\n";
+    html += "    .then(function(h){\n";
+    html += "      tabCache[idx]=h;\n";
+    html += "      delete tabFetching[idx];\n";
+    html += "      if(show&&currentTab===idx){\n";
+    html += "        var cont=document.getElementById('screen-content');\n";
+    html += "        cont.innerHTML=h;\n";
+    html += "        initScreenTab(idx);\n";
+    html += "      }\n";
+    // Daisy-chain: fetch next uncached tab in background
+    html += "      for(var i=0;i<NUM_SCREENS;i++){\n";
+    html += "        if(tabCache[i]===undefined&&!tabFetching[i]){\n";
+    html += "          fetchTab(i,false); break;\n";
+    html += "        }\n";
+    html += "      }\n";
+    html += "    })\n";
+    html += "    .catch(function(e){\n";
+    html += "      delete tabFetching[idx];\n";
+    html += "      if(show&&currentTab===idx){\n";
+    html += "        document.getElementById('screen-content').innerHTML=\n";
+    html += "          '<p style=\"color:red;text-align:center;\">Failed to load \u2013 '+e+'</p>';\n";
+    html += "      }\n";
+    html += "    });\n";
+    html += "}\n";
+
+    // showScreenTab: called by tab button clicks.
+    // Serves from cache instantly if available, otherwise shows loading + fetches.
     html += "function showScreenTab(idx){\n";
     html += "  if(idx===currentTab) return;\n";
     html += "  currentTab=idx;\n";
@@ -844,17 +894,17 @@ void handle_gauges_page() {
     html += "    var b=document.getElementById('tabbtn_'+s);\n";
     html += "    if(b) b.style.background=(s===idx?'#e3eaf6':'#f4f6fa');\n";
     html += "  }\n";
-    html += "  var cont=document.getElementById('screen-content');\n";
-    html += "  cont.innerHTML='<p style=\"text-align:center;color:#888;padding:40px 0;\">Loading...</p>';\n";
-    html += "  fetch('/gauges/screen?s='+idx)\n";
-    html += "    .then(function(r){return r.text();})\n";
-    html += "    .then(function(h){\n";
-    html += "      cont.innerHTML=h;\n";
-    html += "      initScreenTab(idx);\n";
-    html += "    })\n";
-    html += "    .catch(function(e){\n";
-    html += "      cont.innerHTML='<p style=\"color:red;text-align:center;\">Failed to load – '+e+'</p>';\n";
-    html += "    });\n";
+    html += "  if(tabCache[idx]!==undefined){\n";
+    html += "    var cont=document.getElementById('screen-content');\n";
+    html += "    cont.innerHTML=tabCache[idx];\n";
+    html += "    initScreenTab(idx);\n";
+    // Lightweight ping to switch the physical display (redirect response ignored)
+    html += "    fetch('/set-screen?screen='+(idx+1),{redirect:'follow'}).catch(function(){});\n";
+    html += "    return;\n";
+    html += "  }\n";
+    html += "  document.getElementById('screen-content').innerHTML=\n";
+    html += "    '<p style=\"text-align:center;color:#888;padding:40px 0;\">Loading...</p>';\n";
+    html += "  fetchTab(idx,true);\n";
     html += "}\n";
 
     // initScreenTab: called after injecting screen HTML — set up toggles
@@ -907,6 +957,8 @@ void handle_gauges_page() {
     html += "  .then(function(j){\n";
     html += "    if(btn){btn.disabled=false;btn.value='Saved!';\n";
     html += "    setTimeout(function(){btn.value='Apply (no reboot)';},2000);}\n";
+    // Invalidate cache for the saved screen so next visit re-fetches fresh data
+    html += "    delete tabCache[currentTab];\n";
     html += "  })\n";
     html += "  .catch(function(e){\n";
     html += "    console.error('ajaxSave error',e);\n";
@@ -928,6 +980,8 @@ void handle_gauges_page() {
     html += "      if(btn)btn.textContent='Enable Setup Mode';\n";
     html += "      if(lbl){lbl.style.color='#b71c1c';lbl.textContent='SETUP MODE OFF';}\n";
     html += "    }\n";
+    // Invalidate all cached tabs — test mode changes control visibility
+    html += "    tabCache={}; tabFetching={};\n";
     html += "    var prev=currentTab; currentTab=-1; showScreenTab(prev>=0?prev:0);\n";
     html += "  }).catch(function(e){console.error(e);});\n";
     html += "}\n";
@@ -942,11 +996,17 @@ void handle_gauges_page() {
     html += "  .catch(function(e){console.error(e);});\n";
     html += "}\n";
 
-    // Load first tab on page load
+    // Load first tab on page load; background prefetch of remaining tabs is
+    // daisy-chained inside fetchTab() so they load sequentially without
+    // overwhelming the ESP32's single-threaded HTTP handler.
     html += "document.addEventListener('DOMContentLoaded',function(){\n";
     html += "  var initial=0;\n";
     html += "  if(location.hash&&location.hash.indexOf('#tab')===0) initial=parseInt(location.hash.replace('#tab',''))||0;\n";
-    html += "  showScreenTab(initial);\n";
+    html += "  fetchTab(initial,true);\n";
+    html += "  currentTab=initial;\n";
+    html += "  document.getElementById('save_screen').value=initial;\n";
+    html += "  var b=document.getElementById('tabbtn_'+initial);\n";
+    html += "  if(b) b.style.background='#e3eaf6';\n";
     html += "});\n";
     html += "</script>\n";
     html += "</div></body></html>";
@@ -1390,7 +1450,9 @@ void handle_gauges_screen() {
     // Doing it before/during the response caused LVGL DMA flushes to race
     // with TCP send-buffer allocations, leading to crashes on the 2nd or
     // 3rd save→reload cycle.
-    ui_set_screen(s + 1);         // 1-based
+    // display=0 means background prefetch — don't change the visible screen.
+    bool do_display = (config_server.arg("display") != "0");
+    if (do_display) ui_set_screen(s + 1);   // 1-based
 
     // Keep WS paused — the 60-second g_config_page_last_seen watchdog
     // (or navigating away) will resume it.  Do NOT resume here;
@@ -2315,21 +2377,29 @@ void setup_network() {
     }
     // Note: Do not load preferences here; caller should load before UI init when required.
     // WiFi connect or AP fallback
-    WiFi.mode(WIFI_STA);
-    // If a hostname is configured, set it before connecting so DHCP uses it
-    if (saved_hostname.length() > 0) {
-        WiFi.setHostname(saved_hostname.c_str());
-        Serial.println("[WiFi] Hostname set to: " + saved_hostname);
+    bool ap_mode = saved_ssid.length() == 0;
+    if (!ap_mode) {
+        WiFi.mode(WIFI_STA);
+        // If a hostname is configured, set it before connecting so DHCP uses it
+        if (saved_hostname.length() > 0) {
+            WiFi.setHostname(saved_hostname.c_str());
+            Serial.println("[WiFi] Hostname set to: " + saved_hostname);
+        }
+        WiFi.begin(saved_ssid.c_str(), saved_password.c_str());
+        Serial.print("Connecting to WiFi");
+        int tries = 0;
+        while (WiFi.status() != WL_CONNECTED && tries < 30) {
+            delay(500);
+            Serial.print(".");
+            tries++;
+        }
+        if (WiFi.status() != WL_CONNECTED) {
+            ap_mode = true;
+            WiFi.disconnect(true);
+            delay(100);
+        }
     }
-    WiFi.begin(saved_ssid.c_str(), saved_password.c_str());
-    Serial.print("Connecting to WiFi");
-    int tries = 0;
-    while (WiFi.status() != WL_CONNECTED && tries < 30) {
-        delay(500);
-        Serial.print(".");
-        tries++;
-    }
-    if (WiFi.status() == WL_CONNECTED) {
+    if (!ap_mode) {
         // Disable power-save so the radio stays awake between loop() calls.
         WiFi.setSleep(false);
         Serial.println("\nWiFi connected!");
@@ -2344,9 +2414,13 @@ void setup_network() {
             }
         }
     } else {
-        Serial.println("\nWiFi failed, starting AP mode");
+        Serial.println(saved_ssid.length() == 0 ? "No SSID configured, starting AP mode"
+                                                 : "\nWiFi failed, starting AP mode");
         WiFi.mode(WIFI_AP);
         WiFi.softAP("ESP32-SquareDisplay", "12345678");
+        // Disable modem sleep in AP mode — keeps the radio awake for pings
+        // and web page requests (avoids intermittent packet loss).
+        WiFi.setSleep(false);
         Serial.print("AP IP: ");
         Serial.println(WiFi.softAPIP());
     }

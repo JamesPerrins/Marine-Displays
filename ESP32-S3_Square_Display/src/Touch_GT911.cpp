@@ -143,7 +143,7 @@ uint8_t Touch_Read_Data(void) {
   uint8_t Over = 0xAB;
   size_t i = 0,num=0;
   if (!I2C_Read_Touch(GT911_ADDR, ESP_LCD_TOUCH_GT911_READ_XY_REG, buf, 1)) {
-    return true; // I2C failed — don't process garbage data
+    return false; // I2C failed — signal caller to apply backoff
   }
   if ((buf[0] & 0x80) == 0x00) {                                              
     I2C_Write_Touch(GT911_ADDR, ESP_LCD_TOUCH_GT911_READ_XY_REG, &clear, 1);  // No touch data

@@ -216,11 +216,34 @@ void Lvgl_Display_LCD( lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_
 /*Read the touchpad*/
 void Lvgl_Touchpad_Read( lv_indev_drv_t * indev_drv, lv_indev_data_t * data )
 {
+  // Back off I2C polling after repeated failures so a dead/wrong-address
+  // touch controller doesn't stall the main loop on every LVGL tick.
+  // Each failed Wire transaction costs up to Wire.setTimeOut() ms (5 ms);
+  // without backoff that's 5 ms * every tick = significant CPU waste.
+  static uint8_t  fail_count = 0;
+  static uint32_t skip_until = 0;
+
+  uint32_t now = millis();
+  if (skip_until && now < skip_until) {
+    data->state = LV_INDEV_STATE_REL;
+    return;
+  }
+  skip_until = 0;
+
   uint16_t touchpad_x[GT911_LCD_TOUCH_MAX_POINTS] = {0};
   uint16_t touchpad_y[GT911_LCD_TOUCH_MAX_POINTS] = {0};
   uint16_t strength[GT911_LCD_TOUCH_MAX_POINTS]   = {0};
   uint8_t touchpad_cnt = 0;
-  Touch_Read_Data();
+  if (!Touch_Read_Data()) {
+    // I2C failure — after 5 consecutive misses pause for 5 s
+    if (++fail_count >= 5) {
+      skip_until = now + 5000;
+      fail_count = 0;
+    }
+    data->state = LV_INDEV_STATE_REL;
+    return;
+  }
+  fail_count = 0;
   uint8_t touchpad_pressed = Touch_Get_XY(touchpad_x, touchpad_y, strength, &touchpad_cnt, GT911_LCD_TOUCH_MAX_POINTS);
     if (touchpad_pressed && touchpad_cnt > 0) {
     data->point.x = touchpad_x[0];
@@ -357,6 +380,12 @@ void Lvgl_Init(void)
   }
 void Lvgl_Loop(void)
 {
-  lv_timer_handler(); /* let the GUI do its work */
-  // delay( 5 );
+  uint32_t next_ms = lv_timer_handler(); /* let the GUI do its work */
+  // Yield for at least 1 ms (one FreeRTOS tick) after every render pass.
+  // Without this the loop hammers PSRAM continuously, saturating the SPI bus
+  // and causing priority-inversion stalls for Core 0 WiFi/lwIP tasks that
+  // share the bus — visible as dropped pings and sluggish TCP responses.
+  // Cap at 10 ms so we stay responsive to touch and Signal K updates.
+  uint32_t delay_ms = next_ms < 1 ? 1 : (next_ms > 10 ? 10 : next_ms);
+  vTaskDelay(pdMS_TO_TICKS(delay_ms));
 }

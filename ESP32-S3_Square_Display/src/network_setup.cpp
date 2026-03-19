@@ -1027,10 +1027,16 @@ void handle_gauges_screen() {
         config_server.send(400, "text/plain", "Bad screen index");
         return;
     }
-    // Keep WS paused while config page is open — don't resume/re-pause
-    // per fragment, that thrashes TCP buffers and wastes iRAM.
-    g_config_page_last_seen = millis();
-    pause_signalk_ws();           // no-op if already paused
+    // display=0 means a background prefetch triggered by JS lazy-loading.
+    // Background fetches must NOT reset the idle timer — if they did, the
+    // 10-second WS-resume watchdog would keep restarting after the user
+    // navigates away, freezing live data on screen for 10+ extra seconds.
+    // Only user-triggered fetches (display=1) refresh the idle timestamp.
+    bool is_background = (config_server.arg("display") == "0");
+    if (!is_background) {
+        g_config_page_last_seen = millis();
+        pause_signalk_ws();   // no-op if already paused
+    }
 
     // NOTE: ui_set_screen() is called AFTER the HTTP response completes
     // (see bottom of this function) to avoid LVGL DMA flushes during TCP sends.

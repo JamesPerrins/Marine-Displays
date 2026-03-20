@@ -11,6 +11,12 @@
 #include <stdio.h>
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include <WiFi.h>
+#include "Display_ST7701.h"   // Set_Backlight, LCD_Backlight
+
+// Screen-off state — defined in main.cpp
+extern bool     g_screen_is_off;
+extern uint32_t g_last_activity_ms;
 
 // Diagnostic: set to 1 to force byte-swapped (big-endian) drawing path
 #define FORCE_BE_DRAW 0
@@ -245,7 +251,21 @@ void Lvgl_Touchpad_Read( lv_indev_drv_t * indev_drv, lv_indev_data_t * data )
   }
   fail_count = 0;
   uint8_t touchpad_pressed = Touch_Get_XY(touchpad_x, touchpad_y, strength, &touchpad_cnt, GT911_LCD_TOUCH_MAX_POINTS);
-    if (touchpad_pressed && touchpad_cnt > 0) {
+  if (touchpad_pressed && touchpad_cnt > 0) {
+    // Always update activity timestamp on any touch
+    g_last_activity_ms = millis();
+
+    if (g_screen_is_off) {
+      // Wake: restore backlight and disable WiFi modem sleep.
+      // Swallow this touch so it doesn't trigger a UI action.
+      g_screen_is_off = false;
+      Set_Backlight(LCD_Backlight);
+      WiFi.setSleep(false);
+      Serial.println("[SCREEN] Wake on touch — screen on");
+      data->state = LV_INDEV_STATE_REL;
+      return;
+    }
+
     data->point.x = touchpad_x[0];
     data->point.y = touchpad_y[0];
     data->state = LV_INDEV_STATE_PR;

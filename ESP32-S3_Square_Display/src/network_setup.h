@@ -16,6 +16,8 @@ extern WebServer config_server;
 
 // Auto-scroll interval in seconds (0 = off)
 extern uint16_t auto_scroll_sec;
+// Screen-off timeout in minutes (0 = always on)
+extern uint16_t screen_off_timeout_min;
 
 // Request the UI to change auto-scroll interval at runtime
 void set_auto_scroll_interval(uint16_t sec);

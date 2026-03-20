@@ -1,5 +1,6 @@
 #include <Preferences.h>
 #include <esp_err.h>
+#include <WiFi.h>
 // Global test mode flag: disables live data updates when true
 bool test_mode = false;
 #include <Arduino.h>
@@ -44,6 +45,10 @@ bool apply_screen_visuals_for_one(int s);
 #include "driver/spi_master.h"
 
 // External UI elements (per-screen icons are declared in ui_ScreenN.h via ui.h)
+
+// Screen-off power saving state
+bool     g_screen_is_off      = false;
+uint32_t g_last_activity_ms   = 0;   // updated on touch; also used by LVGL_Driver
 
 // Animation state tracking
 static int16_t current_needle_angle = 0;
@@ -1139,6 +1144,7 @@ void setup() {
     Serial.flush();
     setup_network();
     Serial.println("WiFi setup complete");
+    g_last_activity_ms = millis(); // start the inactivity timer after boot
     Serial.flush();
 
     // Heap integrity check after WiFi/network init
@@ -1176,6 +1182,24 @@ void setup() {
 
 void loop() {
     config_server.handleClient();
+
+    // --- Screen-off timeout ---------------------------------------------------
+    // g_last_activity_ms is updated on every touch in Lvgl_Touchpad_Read().
+    // When the timeout fires: backlight off + WiFi modem sleep.
+    // Wake is handled in Lvgl_Touchpad_Read(): first touch restores everything
+    // and is swallowed so it doesn't trigger a UI action.
+    if (screen_off_timeout_min > 0) {
+        uint32_t now_ms = millis();
+        uint32_t timeout_ms = (uint32_t)screen_off_timeout_min * 60UL * 1000UL;
+        if (!g_screen_is_off && (now_ms - g_last_activity_ms >= timeout_ms)) {
+            g_screen_is_off = true;
+            Set_Backlight(0);
+            WiFi.setSleep(true);
+            Serial.println("[SCREEN] Screen off — power saving active");
+        }
+    }
+    // -------------------------------------------------------------------------
+
     // Use Signal K data instead of demo animation
     static int16_t needle_angle = 0;
     static int16_t lower_needle_angle = 0;

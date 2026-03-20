@@ -1,5 +1,6 @@
-#include "Display_ST7701.h"  
+#include "Display_ST7701.h"
 #include "driver/ledc.h"
+#include "TCA9554PWR.h"   // is_board_v4(), backlight_set_pwm(), Set_EXIO, EXIO_PIN2
 // ets_printf writes to hardware UART0 (CH343) regardless of USB CDC config
 extern "C" int ets_printf(const char *fmt, ...);
 #include "drivers/lcd/port/esp_lcd_st7701_interface.h"
@@ -705,9 +706,15 @@ void Set_Backlight(uint8_t Light)
     ledc_set_duty(LEDC_LOW_SPEED_MODE, (ledc_channel_t)PWM_Channel, duty);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, (ledc_channel_t)PWM_Channel);
   }
-  // Toggle expander BL_EN (EXIO2) so boards with expander-controlled
-  // backlight enable behave correctly (power gate).
-  if (Light > 0) Set_EXIO(EXIO_PIN2, High);
-  else Set_EXIO(EXIO_PIN2, Low);
+  if (is_board_v4()) {
+    // V4: CH32V003 PWM register, inverted (0=full bright, 247=off).
+    // Map Light 0-100 → PWM 247-0.
+    uint8_t pwm = (Light == 0) ? 247 : (uint8_t)((uint32_t)(100 - Light) * 247 / 100);
+    backlight_set_pwm(pwm);
+  } else {
+    // V3: BL_EN power gate on EXIO2.
+    if (Light > 0) Set_EXIO(EXIO_PIN2, High);
+    else           Set_EXIO(EXIO_PIN2, Low);
+  }
 }
 

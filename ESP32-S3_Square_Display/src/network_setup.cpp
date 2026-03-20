@@ -243,6 +243,8 @@ String saved_hostname = "";
 String signalk_paths[NUM_SCREENS * 2];
 // Auto-scroll interval in seconds (0 = off)
 uint16_t auto_scroll_sec = 0;
+// Screen-off timeout in minutes (0 = always on)
+uint16_t screen_off_timeout_min = 0;
 // Skip a single load of preferences when we've just saved, so the UI
 // reflects the in-memory `screen_configs` we just updated instead of
 // reloading possibly-stale NVS values.
@@ -340,6 +342,7 @@ void save_preferences(bool skip_screen_blobs = false) {
         // Save auto-scroll setting
         preferences.putUShort("auto_scroll", auto_scroll_sec);
         preferences.putUShort("unit_system", (uint16_t)unit_system);
+        preferences.putUShort("screen_off_tmout", screen_off_timeout_min);
         for (int i = 0; i < NUM_SCREENS * 2; ++i) {
             String key = String("skpath_") + i;
             preferences.putString(key.c_str(), signalk_paths[i]);
@@ -445,6 +448,7 @@ void save_preferences(bool skip_screen_blobs = false) {
                     preferences.putUShort("buzzer_cooldown", buzzer_cooldown_sec);
                     preferences.putUShort("auto_scroll", auto_scroll_sec);
                     preferences.putUShort("unit_system", (uint16_t)unit_system);
+                    preferences.putUShort("screen_off_tmout", screen_off_timeout_min);
                     for (int i = 0; i < NUM_SCREENS * 2; ++i) {
                         String key = String("skpath_") + i;
                         preferences.putString(key.c_str(), signalk_paths[i]);
@@ -534,6 +538,7 @@ void load_preferences() {
         // Load auto-scroll interval (seconds)
         auto_scroll_sec = preferences.getUShort("auto_scroll", 0);
         unit_system = (UnitSystem)preferences.getUShort("unit_system", (uint16_t)UNIT_NAUTICAL_METRIC);
+        screen_off_timeout_min = preferences.getUShort("screen_off_tmout", 0);
         // Load device settings
         buzzer_mode = (int)preferences.getUShort("buzzer_mode", (uint16_t)buzzer_mode);
         buzzer_cooldown_sec = preferences.getUShort("buzzer_cooldown", buzzer_cooldown_sec);
@@ -2206,6 +2211,14 @@ void handle_device_page() {
     html += "<option value='30'" + String(auto_scroll_sec==30?" selected":"") + ">30s</option>";
     html += "<option value='60'" + String(auto_scroll_sec==60?" selected":"") + ">60s</option>";
     html += "</select></div>";
+    // Screen off timeout
+    html += "<div class='form-row'><label>Screen Off:</label><select name='screen_off_timeout'>";
+    html += "<option value='0'"  + String(screen_off_timeout_min==0 ?" selected":"") + ">Always on</option>";
+    html += "<option value='1'"  + String(screen_off_timeout_min==1 ?" selected":"") + ">1 min</option>";
+    html += "<option value='5'"  + String(screen_off_timeout_min==5 ?" selected":"") + ">5 min</option>";
+    html += "<option value='10'" + String(screen_off_timeout_min==10?" selected":"") + ">10 min</option>";
+    html += "<option value='30'" + String(screen_off_timeout_min==30?" selected":"") + ">30 min</option>";
+    html += "</select></div>";
     // Brightness
     html += "<div class='form-row'><label>Brightness:</label><select name='brightness_lv'>";
     html += "<option value='0'" + String(brightness_level==0?" selected":"") + ">Normal</option>";
@@ -2263,6 +2276,12 @@ void handle_save_device() {
         // Apply auto-scroll at runtime
         set_auto_scroll_interval(auto_scroll_sec);
         
+        // Screen off timeout
+        uint16_t sot = (uint16_t)config_server.arg("screen_off_timeout").toInt();
+        // Only accept the allowed values; anything else → always on
+        if (sot != 1 && sot != 5 && sot != 10 && sot != 30) sot = 0;
+        screen_off_timeout_min = sot;
+
         // Brightness level
         uint8_t bl = (uint8_t)config_server.arg("brightness_lv").toInt();
         if (bl > 3) bl = 0;

@@ -230,6 +230,9 @@ void handle_assets_page();
 void handle_assets_upload();
 void handle_assets_upload_post();
 void handle_assets_delete();
+void handle_ota_page();
+void handle_ota_post();
+void handle_ota_upload();
 // Hot-update helper (apply backgrounds/icons at runtime)
 extern bool apply_all_screen_visuals();
 

@@ -20,6 +20,7 @@
 #include <sys/stat.h>
 #include <Update.h>
 #include <esp_ota_ops.h>
+#include "TCA9554PWR.h"
 
 // ...existing code...
 
@@ -2420,6 +2421,15 @@ void setup_network() {
             delay(500);
             Serial.print(".");
             tries++;
+            // Silence buzzer during WiFi wait — setup() may have left BEE_EN/PIN6
+            // HIGH if the I2C expander direction write failed after a crash-reboot.
+            if (is_board_v4()) {
+                Set_EXIOS(Read_EXIOS(exio_output_reg()) & (uint8_t)~(1 << (PIN_BEE_EN - 1)));
+                Mode_EXIO(PIN_BEE_EN, 1);
+            } else {
+                Set_EXIOS(Read_EXIOS(exio_output_reg()) & (uint8_t)~(1 << (EXIO_PIN6 - 1)));
+                Mode_EXIOS(0x00);
+            }
         }
         if (WiFi.status() != WL_CONNECTED) {
             ap_mode = true;

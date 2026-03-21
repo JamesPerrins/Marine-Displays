@@ -1582,16 +1582,23 @@ void loop() {
     }
 
     // Maintain TCA9554 PIN6 LOW (buzzer OFF, active-HIGH circuit) every 50ms.
-    // esp_io_expander_new_i2c_tca9554 resets CONFIG=0xFF (all inputs) during LCD_Init;
-    // Buzzer safety maintenance (V3 only — V3 TCA9554 CONFIG can reset to all-inputs).
-    // On V4, BEE_EN is kept as input via direction mask 0x3A → inherently safe.
-    if (!is_board_v4()) {
+    // Buzzer safety maintenance — runs for both v3 and v4 every 50 ms.
+    // After a crash-reboot the I2C bus can be mid-transaction so the direction
+    // write in setup() silently fails, leaving BEE_EN/PIN6 as OUTPUT HIGH.
+    // Periodically re-assert the safe state so the buzzer can never stay stuck.
+    {
         static unsigned long last_buz_maintain = 0;
         unsigned long now_m = millis();
         if (now_m - last_buz_maintain >= 50) {
             last_buz_maintain = now_m;
-            Set_EXIOS(Read_EXIOS(exio_output_reg()) & (uint8_t)~(1 << (EXIO_PIN6 - 1)));
-            Mode_EXIOS(0x00);
+            if (is_board_v4()) {
+                // Clear BEE_EN output latch (bit6) and keep direction as INPUT
+                Set_EXIOS(Read_EXIOS(exio_output_reg()) & (uint8_t)~(1 << (PIN_BEE_EN - 1)));
+                Mode_EXIO(PIN_BEE_EN, 1); // input = safe (can't drive buzzer)
+            } else {
+                Set_EXIOS(Read_EXIOS(exio_output_reg()) & (uint8_t)~(1 << (EXIO_PIN6 - 1)));
+                Mode_EXIOS(0x00);
+            }
         }
     }
 

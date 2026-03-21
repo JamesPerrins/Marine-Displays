@@ -273,7 +273,8 @@ static std::vector<String> g_iconFiles;
 static std::vector<String> g_bgFiles;
 
 // Single shared HTML buffer for handle_gauges_page() and handle_gauges_screen().
-// Using one 4096-byte buffer instead of two saves 4 KB of internal RAM.
+// Reserved at 8192 to exceed CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL (4096),
+// forcing the backing store into PSRAM and freeing ~8 KB of internal RAM.
 String g_http_html_buf;
 bool   g_http_html_buf_reserved = false;
 
@@ -798,7 +799,7 @@ void handle_gauges_page() {
     extern bool   g_http_html_buf_reserved;
     String& html = g_http_html_buf;
     if (!g_http_html_buf_reserved) {
-        html.reserve(4096);
+        html.reserve(8192);  // >4096 → PSRAM via SPIRAM threshold
         g_http_html_buf_reserved = true;
     }
     html.clear();
@@ -1007,6 +1008,9 @@ void handle_gauges_page() {
     html += "  .catch(function(e){console.error(e);});\n";
     html += "}\n";
 
+    // Keepalive: ping every 8s so the 60s idle watchdog doesn't resume WS
+    html += "setInterval(function(){fetch('/gauges/ping').catch(function(){});},8000);\n";
+
     // Load first tab on page load; background prefetch of remaining tabs is
     // daisy-chained inside fetchTab() so they load sequentially without
     // overwhelming the ESP32's single-threaded HTTP handler.
@@ -1075,7 +1079,7 @@ void handle_gauges_screen() {
     extern bool   g_http_html_buf_reserved;
     String& html = g_http_html_buf;
     if (!g_http_html_buf_reserved) {
-        html.reserve(4096);
+        html.reserve(8192);  // >4096 → PSRAM via SPIRAM threshold
         g_http_html_buf_reserved = true;
     }
     html.clear();
@@ -1486,6 +1490,7 @@ void handle_save_gauges() {
             save_only = config_server.arg("save_screen").toInt();
             if (save_only < 0 || save_only >= NUM_SCREENS) save_only = -1;
         }
+        Serial.printf("[SAVE] POST args=%d, save_screen=%d\n", config_server.args(), save_only);
         int s_start = (save_only >= 0) ? save_only : 0;
         int s_end   = (save_only >= 0) ? save_only + 1 : NUM_SCREENS;
         for (int s = s_start; s < s_end; ++s) {
@@ -1655,6 +1660,9 @@ void handle_save_gauges() {
                     if (config_server.hasArg(dualBottomPathKey)) {
                         strncpy(screen_configs[s].dual_bottom_path, config_server.arg(dualBottomPathKey).c_str(), 127);
                         screen_configs[s].dual_bottom_path[127] = '\0';
+                        Serial.printf("[SAVE] dual_bottom_path_%d = '%s'\n", s, screen_configs[s].dual_bottom_path);
+                    } else {
+                        Serial.printf("[SAVE] dual_bottom_path_%d MISSING from POST\n", s);
                     }
                     
                     String dualBottomFontSizeKey = "dual_bottom_font_size_" + String(s);
@@ -1702,6 +1710,9 @@ void handle_save_gauges() {
                         if (config_server.hasArg(pathKey)) {
                             strncpy(path, config_server.arg(pathKey).c_str(), 127);
                             path[127] = '\0';
+                            Serial.printf("[SAVE] quad_%s_path_%d = '%s'\n", name, s, path);
+                        } else {
+                            Serial.printf("[SAVE] quad_%s_path_%d MISSING from POST\n", name, s);
                         }
                         String sizeKey = "quad_" + String(name) + "_font_size_" + String(s);
                         if (config_server.hasArg(sizeKey)) {
@@ -1887,6 +1898,15 @@ void handle_save_gauges() {
             for (int g = 0; g < 2; ++g)
                 for (int p = 0; p < 5; ++p)
                     screen_configs[s].cal[g][p] = gauge_cal[s][g][p];
+
+        // Debug: dump quad/dual bottom paths before SD write
+        for (int s = s_start; s < s_end; ++s) {
+            Serial.printf("[PRE-SD] s=%d quad: tl='%s' tr='%s' bl='%s' br='%s'\n", s,
+                screen_configs[s].quad_tl_path, screen_configs[s].quad_tr_path,
+                screen_configs[s].quad_bl_path, screen_configs[s].quad_br_path);
+            Serial.printf("[PRE-SD] s=%d dual: top='%s' bottom='%s'\n", s,
+                screen_configs[s].dual_top_path, screen_configs[s].dual_bottom_path);
+        }
 
         // Attempt to write per-screen binary configs to SD immediately so toggles
         // (like show_bottom) persist even if NVS writes fail or are delayed.
@@ -2471,6 +2491,10 @@ void setup_network() {
     // Register web UI routes and start server
     config_server.on("/", handle_root);
     config_server.on("/gauges", handle_gauges_page);
+    config_server.on("/gauges/ping", []() {
+        g_config_page_last_seen = millis();
+        config_server.send(204);
+    });
     config_server.on("/gauges/screen", handle_gauges_screen);
     config_server.on("/save-gauges", HTTP_POST, handle_save_gauges);
     config_server.on("/needles", handle_needles_page);
@@ -2716,7 +2740,7 @@ void handle_assets_page() {
     config_server.setContentLength(CONTENT_LENGTH_UNKNOWN);
     config_server.send(200, "text/html; charset=utf-8", "");
     String html;
-    html.reserve(4096);
+    html.reserve(8192);  // >4096 → PSRAM via SPIRAM threshold
     auto flush = [&]() {
         if (html.length() > 0) {
             config_server.sendContent(html);

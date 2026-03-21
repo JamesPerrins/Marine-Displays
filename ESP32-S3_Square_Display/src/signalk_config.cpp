@@ -10,6 +10,28 @@
 #include <esp_heap_caps.h>
 #include <map>
 
+// STL allocator that places all nodes in PSRAM instead of iRAM.
+template <typename T>
+struct PsramStlAllocator {
+    using value_type = T;
+    PsramStlAllocator() = default;
+    template <class U> PsramStlAllocator(const PsramStlAllocator<U>&) noexcept {}
+    T* allocate(std::size_t n) {
+        void* p = heap_caps_malloc(n * sizeof(T), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!p) throw std::bad_alloc();
+        return static_cast<T*>(p);
+    }
+    void deallocate(T* p, std::size_t) noexcept { heap_caps_free(p); }
+};
+template <class T, class U>
+bool operator==(const PsramStlAllocator<T>&, const PsramStlAllocator<U>&) { return true; }
+template <class T, class U>
+bool operator!=(const PsramStlAllocator<T>&, const PsramStlAllocator<U>&) { return false; }
+
+template <typename K, typename V>
+using PsramMap = std::map<K, V, std::less<K>,
+    PsramStlAllocator<std::pair<const K, V>>>;
+
 // Custom ArduinoJson allocator that uses PSRAM instead of internal RAM.
 // Saves ~4 KB of iRAM on every SK WebSocket message parse.
 struct PsramAllocator {
@@ -51,9 +73,10 @@ volatile float g_nav_longitude = NAN;
 char g_nav_datetime[32]        = {0};
 
 // Extended storage for paths beyond the gauge array (number displays, dual displays)
-static std::map<String, float> extended_sensor_values;
-static std::map<String, String> extended_sensor_units;
-static std::map<String, String> extended_sensor_descriptions;
+// Uses PSRAM allocator to keep map nodes out of iRAM.
+static PsramMap<String, float> extended_sensor_values;
+static PsramMap<String, String> extended_sensor_units;
+static PsramMap<String, String> extended_sensor_descriptions;
 
 // WiFi and HTTP client (static to this file)
 static WebSocketsClient ws_client;

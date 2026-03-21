@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -lh /c/Temp/Marine-Displays/ESP32-S3_Square_Display/src/*.cpp)",
+      "Bash(ls -lh /c/Temp/Marine-Displays/ESP32-S3_Square_Display/src/*.h)",
+      "Bash(xargs cat:*)",
+      "Bash(/dev/null grep:*)"
+    ]
+  }
+}

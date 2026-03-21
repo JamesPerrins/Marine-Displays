@@ -18,6 +18,8 @@
 #include <SD_MMC.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <Update.h>
+#include <esp_ota_ops.h>
 
 // ...existing code...
 
@@ -2054,6 +2056,7 @@ void handle_root() {
     html += "<button class='tab-btn' onclick=\"location.href='/needles'\">Needles</button>";
     html += "<button class='tab-btn' onclick=\"location.href='/assets'\">Assets</button>";
     html += "<button class='tab-btn' onclick=\"location.href='/device'\">Device Settings</button>";
+    html += "<button class='tab-btn' onclick=\"location.href='/update'\">Firmware Update</button>";
     html += "</div>"; // root-actions
     html += "</div>"; // tab-content
     html += "</div></body></html>";
@@ -2472,6 +2475,8 @@ void setup_network() {
     config_server.on("/toggle-test-mode", HTTP_POST, handle_toggle_test_mode);
     config_server.on("/set-screen", handle_set_screen);
     config_server.on("/nvs_test", HTTP_GET, handle_nvs_test);
+    config_server.on("/update", HTTP_GET,  handle_ota_page);
+    config_server.on("/update", HTTP_POST, handle_ota_post, handle_ota_upload);
     config_server.begin();
     Serial.println("[WebServer] Configuration web UI started on port 80");
     // handleClient() is called from loop() on Core 1.
@@ -2815,4 +2820,81 @@ void handle_assets_delete() {
     // redirect back
     config_server.sendHeader("Location", "/assets");
     config_server.send(303, "text/plain", "");
+}
+
+// ---------------------------------------------------------------------------
+// OTA firmware update handlers
+// ---------------------------------------------------------------------------
+void handle_ota_upload() {
+    HTTPUpload& upload = config_server.upload();
+    if (upload.status == UPLOAD_FILE_START) {
+        Serial.printf("[OTA] Start: %s\n", upload.filename.c_str());
+        // UPDATE_SIZE_UNKNOWN lets the Update library size from the partition table
+        if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+            Update.printError(Serial);
+        }
+    } else if (upload.status == UPLOAD_FILE_WRITE) {
+        esp_task_wdt_reset();
+        if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+            Update.printError(Serial);
+        }
+    } else if (upload.status == UPLOAD_FILE_END) {
+        if (Update.end(true)) {
+            Serial.printf("[OTA] Success: %u bytes. Rebooting...\n", (unsigned)upload.totalSize);
+        } else {
+            Update.printError(Serial);
+        }
+    }
+}
+
+void handle_ota_post() {
+    bool ok = !Update.hasError();
+    String html = "<!DOCTYPE html><html><head>";
+    html += "<meta charset='UTF-8'>";
+    if (ok) html += "<meta http-equiv='refresh' content='20;url=/'>";
+    html += STYLE;
+    html += "<title>OTA Update</title></head><body><div class='container'>";
+    if (ok) {
+        html += "<h3>Update successful</h3>";
+        html += "<p>Device is rebooting&hellip; page will reload in 20 seconds.</p>";
+    } else {
+        html += "<h3>Update FAILED</h3>";
+        html += "<p>" + String(Update.errorString()) + "</p>";
+        html += "<p><a href='/update'>Try again</a></p>";
+    }
+    html += "</div></body></html>";
+    config_server.send(ok ? 200 : 500, "text/html", html);
+    if (ok) {
+        delay(500);
+        ESP.restart();
+    }
+}
+
+void handle_ota_page() {
+    // Show running partition and free space so the user can sanity-check
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    const esp_partition_t* next    = esp_ota_get_next_update_partition(NULL);
+    char info[120];
+    snprintf(info, sizeof(info),
+        "Running: %s @ 0x%06lX (%lu KB) &nbsp;|&nbsp; Update target: %s @ 0x%06lX",
+        running ? running->label : "?",
+        running ? (unsigned long)running->address : 0UL,
+        running ? (unsigned long)(running->size / 1024) : 0UL,
+        next    ? next->label : "none",
+        next    ? (unsigned long)next->address : 0UL);
+
+    String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'>";
+    html += STYLE;
+    html += "<title>OTA Firmware Update</title></head><body><div class='container'>";
+    html += "<h2>Firmware Update</h2>";
+    html += "<p style='font-size:0.85em;color:#888'>" + String(info) + "</p>";
+    html += "<form method='POST' action='/update' enctype='multipart/form-data'>";
+    html += "<p>Select a <code>.bin</code> firmware file built for this board:</p>";
+    html += "<input type='file' name='firmware' accept='.bin' required style='margin-bottom:12px'><br>";
+    html += "<input type='submit' value='Upload &amp; Flash' "
+            "onclick=\"this.disabled=true;this.value='Flashing&hellip;';this.form.submit()\">";
+    html += "</form>";
+    html += "<p style='margin-top:20px'><a href='/'>&#8592; Back</a></p>";
+    html += "</div></body></html>";
+    config_server.send(200, "text/html", html);
 }

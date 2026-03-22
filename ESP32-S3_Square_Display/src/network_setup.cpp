@@ -2876,8 +2876,9 @@ void handle_ota_upload() {
             Update.printError(Serial);
         }
     } else if (upload.status == UPLOAD_FILE_END) {
+        esp_task_wdt_reset();   // end() verifies hash — can take a moment
         if (Update.end(true)) {
-            Serial.printf("[OTA] Success: %u bytes. Rebooting...\n", (unsigned)upload.totalSize);
+            Serial.printf("[OTA] Success: %u bytes\n", (unsigned)upload.totalSize);
         } else {
             Update.printError(Serial);
         }
@@ -2902,8 +2903,24 @@ void handle_ota_post() {
     html += "</div></body></html>";
     config_server.send(ok ? 200 : 500, "text/html", html);
     if (ok) {
-        delay(500);
-        ESP.restart();
+        // Flush TCP before we kill the radio — client must receive the page first.
+        config_server.client().flush();
+        delay(200);
+
+        // Turn off backlight and stop the display before restarting.
+        // On ESP32-S3 the RGB panel uses continuous GDMA; if a DMA transfer
+        // is in-flight when esp_restart() is called, the hardware can hang
+        // and the restart never completes — visible as the device freezing
+        // with the screen still lit after an OTA upload.
+        extern void Set_Backlight(uint8_t);
+        Set_Backlight(0);
+        extern esp_lcd_panel_handle_t panel_handle;
+        if (panel_handle) esp_lcd_panel_disp_on_off(panel_handle, false);
+        delay(200);
+
+        Serial.println("[OTA] Restarting...");
+        Serial.flush();
+        esp_restart();
     }
 }
 

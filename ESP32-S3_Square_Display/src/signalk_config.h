@@ -55,12 +55,13 @@ void set_sensor_value(int index, float value);
 // Metadata getters (thread-safe)
 String get_sensor_unit(int index);
 String get_sensor_description(int index);
-void set_sensor_metadata(int index, const char* unit, const char* description);
+void set_sensor_metadata(int index, const char* unit, const char* description, const char* display_name = nullptr);
 
 // Path-based getters (for number and dual displays that may use non-gauge paths)
 float get_sensor_value_by_path(const String& path);
 String get_sensor_unit_by_path(const String& path);
 String get_sensor_description_by_path(const String& path);
+String get_sensor_display_name_by_path(const String& path);
 
 // Backward compatibility helpers
 inline float get_frequency_hz() { return get_sensor_value(SCREEN1_RPM); }

@@ -4,7 +4,12 @@
       "Bash(ls -lh /c/Temp/Marine-Displays/ESP32-S3_Square_Display/src/*.cpp)",
       "Bash(ls -lh /c/Temp/Marine-Displays/ESP32-S3_Square_Display/src/*.h)",
       "Bash(xargs cat:*)",
-      "Bash(/dev/null grep:*)"
+      "Bash(/dev/null grep:*)",
+      "Read(//c/Temp/Marine-Displays/**)",
+      "Bash(head -10 grep -n \"void LCD_DisplayOff\\\\|void LCD_Backlight\\\\|void.*backlight\" /c/Temp/Marine-Displays/ESP32-S3_Square_Display/src/Display_ST7701.cpp /c/Temp/Marine-Displays/ESP32-S3_Square_Display/src/Display_ST7701.h)",
+      "Bash(grep -v \"//.*desc\\\\|Serial\\\\|printf\\\\|log\\\\|LOG\")",
+      "Bash(grep -v \"Serial\\\\|printf\\\\|log\\\\|//\")",
+      "Bash(grep -v \"Serial\\\\|printf\\\\|ESP_LOG\\\\|//\")"
     ]
   }
 }

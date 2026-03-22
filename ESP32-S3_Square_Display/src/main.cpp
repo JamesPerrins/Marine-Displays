@@ -300,11 +300,11 @@ static void update_number_display_for_screen(int screen_num) {
     if (sensor_idx >= 0) {
         // Use the sensor value from the matching path
         display_value = get_sensor_value(sensor_idx);
-        
+
         // Get metadata from SignalK (units and description)
         unit_str = get_sensor_unit(sensor_idx);
         description = get_sensor_description(sensor_idx);
-        
+
         // Convert SI units to display units based on unit system preference
         display_value = convert_unit(display_value, unit_str, number_path, unit_str);
     } else {
@@ -313,6 +313,12 @@ static void update_number_display_for_screen(int screen_num) {
         unit_str = get_sensor_unit_by_path(number_path);
         description = get_sensor_description_by_path(number_path);
         display_value = convert_unit(display_value, unit_str, number_path, unit_str);
+    }
+
+    // Prefer displayName over raw description for the label
+    {
+        String dn = get_sensor_display_name_by_path(number_path);
+        if (dn.length() > 0) description = dn;
     }
     
     // Create number display if it doesn't exist (note: may also be created externally via ui_hotupdate)
@@ -418,21 +424,23 @@ static void update_dual_number_display_for_screen(int screen_num) {
     String top_unit = "";
     String top_description = "";
     get_path_data(top_path, top_value, top_unit, top_description);
-    
+    { String dn = get_sensor_display_name_by_path(top_path); if (dn.length() > 0) top_description = dn; }
+
     // Get bottom display data
     float bottom_value = 0.0f;
     String bottom_unit = "";
     String bottom_description = "";
     get_path_data(bottom_path, bottom_value, bottom_unit, bottom_description);
-    
+    { String dn = get_sensor_display_name_by_path(bottom_path); if (dn.length() > 0) bottom_description = dn; }
+
     // Update both displays
-    dual_number_display_update_top(screen_idx, 
-                                     isnan(top_value) ? 0.0f : top_value, 
-                                     top_unit.c_str(), 
+    dual_number_display_update_top(screen_idx,
+                                     isnan(top_value) ? 0.0f : top_value,
+                                     top_unit.c_str(),
                                      top_description.c_str());
-    dual_number_display_update_bottom(screen_idx, 
-                                        isnan(bottom_value) ? 0.0f : bottom_value, 
-                                        bottom_unit.c_str(), 
+    dual_number_display_update_bottom(screen_idx,
+                                        isnan(bottom_value) ? 0.0f : bottom_value,
+                                        bottom_unit.c_str(),
                                         bottom_description.c_str());
 
     // Buzzer alarm check for Dual display
@@ -515,7 +523,13 @@ static void update_quad_number_display_for_screen(int screen_num) {
     get_path_data(tr_path, tr_value, tr_unit, tr_description);
     get_path_data(bl_path, bl_value, bl_unit, bl_description);
     get_path_data(br_path, br_value, br_unit, br_description);
-    
+
+    // Prefer displayName over raw description for each quadrant label
+    { String dn = get_sensor_display_name_by_path(tl_path); if (dn.length() > 0) tl_description = dn; }
+    { String dn = get_sensor_display_name_by_path(tr_path); if (dn.length() > 0) tr_description = dn; }
+    { String dn = get_sensor_display_name_by_path(bl_path); if (dn.length() > 0) bl_description = dn; }
+    { String dn = get_sensor_display_name_by_path(br_path); if (dn.length() > 0) br_description = dn; }
+
     // Update all quadrants
     quad_number_display_update_tl(screen_idx, isnan(tl_value) ? 0.0f : tl_value, tl_unit.c_str(), tl_description.c_str());
     quad_number_display_update_tr(screen_idx, isnan(tr_value) ? 0.0f : tr_value, tr_unit.c_str(), tr_description.c_str());
@@ -596,12 +610,14 @@ static void update_gauge_number_display_for_screen(int screen_num) {
     String center_unit = "";
     String center_description = "";
     get_path_data(center_path, center_value, center_unit, center_description);
-    
+    String center_display_name = get_sensor_display_name_by_path(center_path);
+
     // Update center number display
-    gauge_number_display_update_center(screen_idx, 
-                                         isnan(center_value) ? 0.0f : center_value, 
-                                         center_unit.c_str(), 
-                                         center_description.c_str());
+    gauge_number_display_update_center(screen_idx,
+                                         isnan(center_value) ? 0.0f : center_value,
+                                         center_unit.c_str(),
+                                         center_description.c_str(),
+                                         center_display_name.c_str());
 
     // Buzzer alarm check for Gauge+Number center display
     // min[1][1]/buzzer[1][1]=low, max[1][2]/buzzer[1][2]=high
@@ -1085,6 +1101,8 @@ void setup() {
     // Load persisted preferences BEFORE initializing the UI so dynamic image paths
     // are available during screen construction.
     load_preferences();
+
+
 
     // LVGL
     Lvgl_Init();

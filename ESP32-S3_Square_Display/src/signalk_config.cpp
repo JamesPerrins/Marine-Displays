@@ -66,6 +66,7 @@ SemaphoreHandle_t sensor_mutex = NULL;
 // Metadata storage for each parameter
 String g_sensor_units[TOTAL_PARAMS];
 String g_sensor_descriptions[TOTAL_PARAMS];
+String g_sensor_display_names[TOTAL_PARAMS]; // Signal K meta.displayName
 
 // Navigation globals for POSITION/COMPASS display types
 volatile float g_nav_latitude  = NAN;
@@ -77,6 +78,7 @@ char g_nav_datetime[32]        = {0};
 static PsramMap<String, float> extended_sensor_values;
 static PsramMap<String, String> extended_sensor_units;
 static PsramMap<String, String> extended_sensor_descriptions;
+static PsramMap<String, String> extended_sensor_display_names;
 
 // WiFi and HTTP client (static to this file)
 static WebSocketsClient ws_client;
@@ -204,13 +206,39 @@ String get_sensor_description(int index) {
     return desc;
 }
 
-void set_sensor_metadata(int index, const char* unit, const char* description) {
+void set_sensor_metadata(int index, const char* unit, const char* description, const char* display_name) {
     if (index < 0 || index >= TOTAL_PARAMS) return;
     if (sensor_mutex != NULL && xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(50))) {
         if (unit) g_sensor_units[index] = String(unit);
         if (description) g_sensor_descriptions[index] = String(description);
+        if (display_name) g_sensor_display_names[index] = String(display_name);
         xSemaphoreGive(sensor_mutex);
     }
+}
+
+String get_sensor_display_name_by_path(const String& path) {
+    if (path.length() == 0) return "";
+
+    // Check indexed gauge paths first
+    for (int i = 0; i < TOTAL_PARAMS; i++) {
+        if (signalk_paths[i] == path) {
+            if (sensor_mutex != NULL && xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(50))) {
+                String dn = g_sensor_display_names[i];
+                xSemaphoreGive(sensor_mutex);
+                return dn;
+            }
+            return "";
+        }
+    }
+
+    // Check extended storage
+    if (sensor_mutex != NULL && xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(50))) {
+        auto it = extended_sensor_display_names.find(path);
+        String dn = (it != extended_sensor_display_names.end()) ? it->second : "";
+        xSemaphoreGive(sensor_mutex);
+        return dn;
+    }
+    return "";
 }
 
 // Get sensor value by path (for number and dual displays that may use non-gauge paths)
@@ -282,51 +310,40 @@ String get_sensor_description_by_path(const String& path) {
 // Fetch metadata from SignalK REST API for a specific path
 static void fetch_metadata_for_path(int index, const String &path) {
     if (path.length() == 0) return;
-    
-    // Convert dots to slashes for REST API path
+
+    // Use the /meta sub-endpoint — returns only the metadata object, not the
+    // full path response (which includes value, source, timestamp, etc. and can
+    // exceed a 2 KB JSON buffer, causing the meta field to be silently dropped).
     String rest_path = path;
     rest_path.replace(".", "/");
-    
+
     HTTPClient http;
-    String url = "http://" + server_ip_str + ":" + String(server_port_num) + "/signalk/v1/api/vessels/self/" + rest_path;
-    
-    esp_task_wdt_reset(); // prevent WDT during HTTP fetch
+    String url = "http://" + server_ip_str + ":" + String(server_port_num)
+                 + "/signalk/v1/api/vessels/self/" + rest_path + "/meta";
+
+    esp_task_wdt_reset();
     http.begin(url);
-    http.setTimeout(1500); // 1.5s — fast LAN; long enough for SK, short enough to avoid WDT
+    http.setTimeout(1500);
     int httpCode = http.GET();
-    
+
     if (httpCode == HTTP_CODE_OK) {
         String payload = http.getString();
-        
-        BasicJsonDocument<PsramAllocator> doc(2048);
+        // The /meta response is just the meta object — no nesting needed.
+        BasicJsonDocument<PsramAllocator> doc(512);
         DeserializationError err = deserializeJson(doc, payload);
-        
         if (!err) {
-            // Check for meta field
-            if (doc.containsKey("meta")) {
-                JsonObject meta = doc["meta"].as<JsonObject>();
-                const char* unit = nullptr;
-                const char* description = nullptr;
-                
-                if (meta.containsKey("units")) {
-                    unit = meta["units"];
-                }
-                if (meta.containsKey("description")) {
-                    description = meta["description"];
-                }
-                
-                if (unit || description) {
-                    set_sensor_metadata(index, unit, description);
-                }
-            } else {
-            }
+            const char* unit         = doc.containsKey("units")       ? doc["units"].as<const char*>()       : nullptr;
+            const char* description  = doc.containsKey("description") ? doc["description"].as<const char*>() : nullptr;
+            const char* display_name = doc.containsKey("displayName") ? doc["displayName"].as<const char*>() : nullptr;
+            if (unit || description || display_name)
+                set_sensor_metadata(index, unit, description, display_name);
         } else {
-            Serial.printf("[SIGNALK] JSON parse error for %s: %s\n", path.c_str(), err.c_str());
+            Serial.printf("[SIGNALK] meta parse error for %s: %s\n", path.c_str(), err.c_str());
         }
     } else {
-        Serial.printf("[SIGNALK] HTTP GET failed for %s: code %d\n", path.c_str(), httpCode);
+        Serial.printf("[SIGNALK] meta fetch failed for %s: code %d\n", path.c_str(), httpCode);
     }
-    
+
     http.end();
 }
 
@@ -356,31 +373,33 @@ void fetch_all_metadata() {
         }
         
         if (!in_gauge) {
-            // Fetch metadata and store in extended map
+            // Fetch metadata and store in extended map — use /meta sub-endpoint
+            // (flat JSON: units/description/displayName) to avoid buffer overflow
             String api_path = path;
             api_path.replace('.', '/');
-            String url = "http://" + server_ip_str + ":" + String(server_port_num) + 
-                         "/signalk/v1/api/vessels/self/" + api_path;
-            
+            String url = "http://" + server_ip_str + ":" + String(server_port_num) +
+                         "/signalk/v1/api/vessels/self/" + api_path + "/meta";
+
             esp_task_wdt_reset(); // prevent WDT across multi-path loop
             HTTPClient http;
             http.setTimeout(1500);
             http.begin(url);
             int httpCode = http.GET();
-            
+
             if (httpCode == 200) {
                 String payload = http.getString();
-                BasicJsonDocument<PsramAllocator> doc(2048);
+                BasicJsonDocument<PsramAllocator> doc(512);
                 DeserializationError err = deserializeJson(doc, payload);
-                
-                if (!err && doc.containsKey("meta")) {
-                    JsonObject meta = doc["meta"].as<JsonObject>();
-                    String unit = meta.containsKey("units") ? String(meta["units"].as<const char*>()) : String("");
-                    String description = meta.containsKey("description") ? String(meta["description"].as<const char*>()) : String("");
-                    
+
+                if (!err) {
+                    String unit         = doc.containsKey("units")       ? String(doc["units"].as<const char*>())       : String("");
+                    String description  = doc.containsKey("description") ? String(doc["description"].as<const char*>()) : String("");
+                    String display_name = doc.containsKey("displayName") ? String(doc["displayName"].as<const char*>()) : String("");
+
                     if (sensor_mutex != NULL && xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(50))) {
-                        if (unit.length() > 0) extended_sensor_units[path] = unit;
-                        if (description.length() > 0) extended_sensor_descriptions[path] = description;
+                        if (unit.length()         > 0) extended_sensor_units[path]         = unit;
+                        if (description.length()  > 0) extended_sensor_descriptions[path]  = description;
+                        if (display_name.length() > 0) extended_sensor_display_names[path] = display_name;
                         xSemaphoreGive(sensor_mutex);
                     }
                 }

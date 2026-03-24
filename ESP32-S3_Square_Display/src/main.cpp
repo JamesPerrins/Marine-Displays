@@ -15,6 +15,7 @@ bool test_mode = false;
 #include "signalk_config.h"
 #include "screen_config_c_api.h"
 #include "network_setup.h"
+#include "mqtt_config.h"
 #include "gauge_config.h"
 #include "needle_style.h"
 #include "number_display.h"
@@ -1158,23 +1159,39 @@ void setup() {
         ets_printf("[HEAP] *** CORRUPTION detected AFTER setup_network ***\r\n");
     }
     
-    // Start Signal K only if server is actually configured
-    Serial.println("Checking Signal K configuration...");
+    // Start data connection — MQTT or WebSocket depending on conn_type
+    Serial.println("Checking data connection configuration...");
     Serial.flush();
-    String sk_ip = get_signalk_server_ip();
-    Serial.print("Signal K Server IP: '");
-    Serial.print(sk_ip);
-    Serial.println("'");
-    Serial.flush();
-    
-    if (sk_ip.length() > 0 && is_wifi_connected()) {
-        Serial.println("Starting Signal K...");
-        Serial.flush();
-        enable_signalk("", "", sk_ip.c_str(), get_signalk_server_port());
+
+    if (conn_type >= CONN_MQTT) {
+        if (mqtt_broker.length() > 0 && is_wifi_connected()) {
+            Serial.printf("Starting MQTT — broker=%s port=%u prefix='%s'\n",
+                          mqtt_broker.c_str(), mqtt_port, mqtt_topic_prefix.c_str());
+            Serial.flush();
+            load_signalk_paths();
+            enable_mqtt(mqtt_broker.c_str(), mqtt_port,
+                        mqtt_user.c_str(), mqtt_pass.c_str(),
+                        mqtt_topic_prefix.c_str());
+        } else {
+            Serial.println("MQTT not configured yet or WiFi not connected");
+            Serial.println("Connect to web UI to configure MQTT broker");
+            Serial.flush();
+        }
     } else {
-        Serial.println("Signal K not configured yet");
-        Serial.println("Connect to web UI to configure Signal K server");
+        String sk_ip = get_signalk_server_ip();
+        Serial.print("Signal K Server IP: '");
+        Serial.print(sk_ip);
+        Serial.println("'");
         Serial.flush();
+        if (sk_ip.length() > 0 && is_wifi_connected()) {
+            Serial.println("Starting Signal K...");
+            Serial.flush();
+            enable_signalk("", "", sk_ip.c_str(), get_signalk_server_port());
+        } else {
+            Serial.println("Signal K not configured yet");
+            Serial.println("Connect to web UI to configure Signal K server");
+            Serial.flush();
+        }
     }
     
     Serial.println("Display initialized with WiFi optimizations.");

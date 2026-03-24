@@ -91,6 +91,13 @@ void refresh_signalk_subscriptions();
 void subscribe_to_active_screen(int screen_1based);
 // Fetch metadata for all configured paths (gauges, number, dual displays)
 void fetch_all_metadata();
+// Populate signalk_paths[] from stored configuration so MQTT routing works.
+// Must be called before enable_mqtt().
+void load_signalk_paths();
+
+// Route an incoming value (from MQTT or any non-WS source) to the correct
+// gauge slot or extended sensor map by SK path string.
+void update_signalk_value(const char* path, float value);
 
 // Enqueue an outgoing message to be sent when WS is connected
 void enqueue_signalk_message(const String &msg);

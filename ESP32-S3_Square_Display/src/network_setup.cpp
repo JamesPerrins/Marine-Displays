@@ -1,29 +1,7 @@
-// ...existing code...
-
-#include "gauge_config.h"
-#include <Arduino.h>
-#include <WiFi.h>
-#include <WebServer.h>
-#include <ESPmDNS.h>
-#include <Preferences.h>
-#include <vector>
-#include <set>
-#include "network_setup.h"
 #include "signalk_config.h"
-#include "gauge_config.h"
 #include "screen_config_c_api.h"
-#include "ui_Settings.h"
-#include <FS.h>
-#include <SPIFFS.h>
-#include <SD_MMC.h>
-#include <dirent.h>
-#include <sys/stat.h>
-#include <Update.h>
-#include <esp_ota_ops.h>
+#include "network_setup.h"
 
-// ...existing code...
-
-// Place fallback/error screen logic after all includes and config loads
 extern "C" void show_fallback_error_screen_if_needed() {
     // A screen is considered configured if ANY of the following are non-default:
     //   - display_type != GAUGE (NUMBER/DUAL/QUAD/GRAPH/COMPASS/POSITION have no cal points)
@@ -71,10 +49,7 @@ extern "C" void show_fallback_error_screen_if_needed() {
     }
 }
 
-// ...existing code...
-
 #include "gauge_config.h"
-
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -99,6 +74,13 @@ extern "C" void show_fallback_error_screen_if_needed() {
 #include "esp_log.h"
 #include "needle_style.h"
 #include "TCA9554PWR.h"
+#include "ui_Settings.h"
+#include <vector>
+#include <set>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <Update.h>
+#include <esp_ota_ops.h>
 
 static const char *TAG_SETUP = "network_setup";
 
@@ -251,6 +233,13 @@ String signalk_paths[NUM_SCREENS * 2];
 uint16_t auto_scroll_sec = 0;
 // Screen-off timeout in minutes (0 = always on)
 uint16_t screen_off_timeout_min = 0;
+// Connection type and MQTT settings
+ConnType conn_type = CONN_WS;
+String mqtt_broker = "";
+uint16_t mqtt_port = 1883;
+String mqtt_user = "";
+String mqtt_pass = "";
+String mqtt_topic_prefix = "";
 // Skip a single load of preferences when we've just saved, so the UI
 // reflects the in-memory `screen_configs` we just updated instead of
 // reloading possibly-stale NVS values.
@@ -354,6 +343,13 @@ void save_preferences(bool skip_screen_blobs = false) {
             String key = String("skpath_") + i;
             preferences.putString(key.c_str(), signalk_paths[i]);
         }
+        // Save connection type and MQTT settings
+        preferences.putUShort("conn_type", (uint16_t)conn_type);
+        preferences.putString("mqtt_broker", mqtt_broker);
+        preferences.putUShort("mqtt_port", mqtt_port);
+        preferences.putString("mqtt_user", mqtt_user);
+        preferences.putString("mqtt_pass", mqtt_pass);
+        preferences.putString("mqtt_prefix", mqtt_topic_prefix);
         preferences.end();
     }
 
@@ -529,6 +525,28 @@ void save_preferences(bool skip_screen_blobs = false) {
         } else {
             Serial.println("[SD SAVE] Failed to open /config/signalk_paths.txt for writing");
         }
+        // Write wifi/network backup including MQTT settings
+        File wbf = SD_MMC.open("/config/wifi_backup.txt", FILE_WRITE);
+        if (wbf) {
+            wbf.println(saved_ssid);
+            wbf.println(saved_password);
+            wbf.println(saved_signalk_ip);
+            wbf.println(String(saved_signalk_port));
+            wbf.println(saved_hostname);
+            wbf.println(String((int)conn_type));
+            wbf.println(mqtt_broker);
+            wbf.println(String(mqtt_port));
+            wbf.println(mqtt_user);
+            wbf.println(mqtt_pass);
+            wbf.println(mqtt_topic_prefix);
+            wbf.flush();
+            size_t wbf_size = wbf.size();
+            wbf.close();
+            Serial.printf("[SD SAVE] wifi_backup.txt written (%u bytes) conn_type=%u broker='%s'\n",
+                          (unsigned)wbf_size, (unsigned)conn_type, mqtt_broker.c_str());
+        } else {
+            Serial.println("[SD SAVE] Failed to open /config/wifi_backup.txt for writing");
+        }
     }
 } // end save_preferences
 
@@ -563,6 +581,13 @@ void load_preferences() {
             String key = String("skpath_") + i;
             signalk_paths[i] = preferences.getString(key.c_str(), "");
         }
+        // Load connection type and MQTT settings
+        conn_type         = (ConnType)preferences.getUShort("conn_type", (uint16_t)CONN_WS);
+        mqtt_broker       = preferences.getString("mqtt_broker", "");
+        mqtt_port         = preferences.getUShort("mqtt_port", 1883);
+        mqtt_user         = preferences.getString("mqtt_user", "");
+        mqtt_pass         = preferences.getString("mqtt_pass", "");
+        mqtt_topic_prefix = preferences.getString("mqtt_prefix", "");
         preferences.end();
     }
     // Fill in any missing SignalK paths from SD fallback file (per-path, not all-or-nothing)
@@ -587,6 +612,42 @@ void load_preferences() {
     }
     Serial.printf("[DEBUG] Loaded settings: ssid='%s' signalk_ip='%s' port=%u\n",
                   saved_ssid.c_str(), saved_signalk_ip.c_str(), saved_signalk_port);
+
+    // Load wifi/network backup from SD — SD is authoritative and always wins over NVS
+    {
+        const char *bakpath = "/config/wifi_backup.txt";
+        if (SD_MMC.exists(bakpath)) {
+            File bak = SD_MMC.open(bakpath, FILE_READ);
+            if (bak) {
+                String bak_ssid      = bak.readStringUntil('\n'); bak_ssid.trim();
+                String bak_pass      = bak.readStringUntil('\n'); bak_pass.trim();
+                String bak_sk_ip     = bak.readStringUntil('\n'); bak_sk_ip.trim();
+                String bak_sk_port   = bak.readStringUntil('\n'); bak_sk_port.trim();
+                String bak_hostname  = bak.readStringUntil('\n'); bak_hostname.trim();
+                String bak_conn_type = bak.readStringUntil('\n'); bak_conn_type.trim();
+                String bak_broker    = bak.readStringUntil('\n'); bak_broker.trim();
+                String bak_port      = bak.readStringUntil('\n'); bak_port.trim();
+                String bak_user      = bak.readStringUntil('\n'); bak_user.trim();
+                String bak_mqtt_pass = bak.readStringUntil('\n'); bak_mqtt_pass.trim();
+                String bak_prefix    = bak.readStringUntil('\n'); bak_prefix.trim();
+                bak.close();
+                // SD backup always wins — it is written on every save and survives firmware flash
+                if (bak_ssid.length() > 0)           saved_ssid       = bak_ssid;
+                if (bak_pass.length() > 0)            saved_password   = bak_pass;
+                if (bak_sk_ip.length() > 0)           saved_signalk_ip = bak_sk_ip;
+                if (bak_sk_port.toInt() > 0)          saved_signalk_port = (uint16_t)bak_sk_port.toInt();
+                if (bak_hostname.length() > 0)        saved_hostname   = bak_hostname;
+                if (bak_conn_type.length() > 0)       conn_type        = (ConnType)bak_conn_type.toInt();
+                if (bak_broker.length() > 0)          mqtt_broker      = bak_broker;
+                if (bak_port.toInt() > 0)             mqtt_port        = (uint16_t)bak_port.toInt();
+                if (bak_user.length() > 0)            mqtt_user        = bak_user;
+                if (bak_mqtt_pass.length() > 0)       mqtt_pass        = bak_mqtt_pass;
+                if (bak_prefix.length() > 0)          mqtt_topic_prefix = bak_prefix;
+                Serial.printf("[SD LOAD] wifi_backup: conn_type=%u broker='%s' prefix='%s'\n",
+                              (unsigned)conn_type, mqtt_broker.c_str(), mqtt_topic_prefix.c_str());
+            }
+        }
+    }
 
     // Initialize defaults
     for (int s = 0; s < NUM_SCREENS; ++s) {
@@ -2079,16 +2140,43 @@ void handle_network_page() {
     html += "<div id='scanResults' style='margin:0 0 10px 148px;display:none'></div>";
     html += "<div class='form-row'><label>Password:</label><input name='password' type='password' value='" + saved_password + "'></div>";
 
+    // Connection type dropdown
+    html += "<div class='form-row'><label>Connection:</label>"
+            "<select id='conn_type' name='conn_type' onchange='toggleConnFields()'>"
+            "<option value='0'" + String(conn_type==CONN_WS   ?" selected":"") + ">WebSocket</option>"
+            "<option value='2'" + String(conn_type==CONN_MQTT ?" selected":"") + ">MQTT</option>"
+            "<option value='3'" + String(conn_type==CONN_MQTTS?" selected":"") + ">MQTT (TLS)</option>"
+            "</select></div>";
+
+    // SignalK fields (hidden when MQTT selected)
+    html += "<div id='sk_fields'>";
     html += "<div class='form-row'><label>SignalK Server:</label><input name='signalk_ip' type='text' value='" + saved_signalk_ip + "'></div>";
     html += "<div class='form-row'><label>SignalK Port:</label><input name='signalk_port' type='number' value='" + String(saved_signalk_port) + "'></div>";
+    html += "</div>";
+
+    // MQTT fields (hidden when WS selected)
+    html += "<div id='mqtt_fields'>";
+    html += "<div class='form-row'><label>MQTT Broker:</label><input name='mqtt_broker' type='text' value='" + mqtt_broker + "'></div>";
+    html += "<div class='form-row'><label>MQTT Port:</label><input name='mqtt_port' type='number' value='" + String(mqtt_port) + "'></div>";
+    html += "<div class='form-row'><label>MQTT User:</label><input name='mqtt_user' type='text' value='" + mqtt_user + "'></div>";
+    html += "<div class='form-row'><label>MQTT Password:</label><input name='mqtt_pass' type='password' value='" + mqtt_pass + "'></div>";
+    html += "<div class='form-row'><label>Topic Prefix:</label><input name='mqtt_prefix' type='text' value='" + mqtt_topic_prefix + "' style='width:60%' placeholder='N/signalk/&lt;systemId&gt;/vessels/self'></div>";
+    html += "</div>";
 
     html += "<div class='form-row'><label>ESP32 Hostname:</label><input name='hostname' type='text' value='" + saved_hostname + "'></div>";
     html += "<div style='text-align:center;margin-top:12px;'><button class='tab-btn' type='submit' style='padding:10px 18px;'>Save & Reboot</button></div>";
     html += "</form>";
     html += "<p style='text-align:center; margin-top:10px;'><a href='/'>Back</a></p>";
 
-    // JavaScript for WiFi scanning
+    // JavaScript for WiFi scanning and connection type toggle
     html += "<script>"
+            "function toggleConnFields(){"
+              "var v=parseInt(document.getElementById('conn_type').value);"
+              "var mqtt=v>=2;"
+              "document.getElementById('sk_fields').style.display=mqtt?'none':'';"
+              "document.getElementById('mqtt_fields').style.display=mqtt?'':'none';"
+            "}"
+            "toggleConnFields();"
             "function scanWifi(){"
               "var btn=document.getElementById('scanBtn');"
               "var div=document.getElementById('scanResults');"
@@ -2129,11 +2217,21 @@ void handle_save_wifi() {
         saved_signalk_ip = config_server.arg("signalk_ip");
         saved_signalk_port = config_server.arg("signalk_port").toInt();
         saved_hostname = config_server.arg("hostname");
+        // Parse connection type and MQTT settings
+        conn_type = (ConnType)config_server.arg("conn_type").toInt();
+        if (config_server.hasArg("mqtt_broker")) mqtt_broker = config_server.arg("mqtt_broker");
+        if (config_server.hasArg("mqtt_port"))   mqtt_port   = (uint16_t)config_server.arg("mqtt_port").toInt();
+        if (config_server.hasArg("mqtt_user"))   mqtt_user   = config_server.arg("mqtt_user");
+        if (config_server.hasArg("mqtt_pass"))   mqtt_pass   = config_server.arg("mqtt_pass");
+        if (config_server.hasArg("mqtt_prefix")) mqtt_topic_prefix = config_server.arg("mqtt_prefix");
+        if (mqtt_port == 0) mqtt_port = 1883;
         save_preferences();
         Serial.println("[WiFi Config] SSID: " + saved_ssid);
         Serial.println("[WiFi Config] SignalK IP: " + saved_signalk_ip);
         Serial.printf("[WiFi Config] SignalK Port: %u\n", saved_signalk_port);
         Serial.println("[WiFi Config] Hostname: " + saved_hostname);
+        Serial.printf("[WiFi Config] conn_type=%u mqtt_broker='%s' mqtt_port=%u\n",
+                      (unsigned)conn_type, mqtt_broker.c_str(), mqtt_port);
         String html = "<html><head>";
         html += STYLE;
         html += "<title>Saved</title></head><body><div class='container'>";

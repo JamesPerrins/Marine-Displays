@@ -245,6 +245,32 @@ float get_sensor_value_by_path(const String& path) {
     return NAN;
 }
 
+void load_signalk_paths() {
+    for (int i = 0; i < TOTAL_PARAMS; i++) {
+        signalk_paths[i] = get_signalk_path_by_index(i);
+    }
+}
+
+// Route an incoming value (from MQTT or any non-WS source) by SK path string.
+// Matches gauge slots first; falls back to the extended sensor map.
+void update_signalk_value(const char* path, float value) {
+    if (!path || path[0] == '\0') return;
+    last_message_time = millis();
+    bool found_in_gauge = false;
+    for (int i = 0; i < TOTAL_PARAMS; i++) {
+        if (signalk_paths[i].length() > 0 && signalk_paths[i].equals(path)) {
+            set_sensor_value(i, value);
+            found_in_gauge = true;
+        }
+    }
+    if (!found_in_gauge) {
+        if (sensor_mutex != NULL && xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(50))) {
+            extended_sensor_values[String(path)] = value;
+            xSemaphoreGive(sensor_mutex);
+        }
+    }
+}
+
 // Get sensor unit by path
 String get_sensor_unit_by_path(const String& path) {
     if (path.length() == 0) return "";

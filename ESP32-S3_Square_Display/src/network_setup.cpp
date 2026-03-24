@@ -1,3 +1,4 @@
+#include "network_setup.h"
 #include "signalk_config.h"
 #include "screen_config_c_api.h"
 #include "ui_Settings.h"

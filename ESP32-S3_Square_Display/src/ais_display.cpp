@@ -44,7 +44,10 @@ static AisTarget  g_ais_targets[AIS_MAX_TARGETS];
 static int        g_ais_target_count = 0;
 static SemaphoreHandle_t g_ais_mutex = NULL;
 static unsigned long g_ais_last_fetch = 0;
+static int           g_ais_fail_count = 0;
+static bool          g_ais_self_key_failed = false;
 #define AIS_FETCH_INTERVAL_MS 5000
+#define AIS_FAIL_BACKOFF_MAX  60000   // back off to 1 min after repeated failures
 
 // ─── LVGL objects per screen ─────────────────────────────────────────────────
 static lv_obj_t*   a_bg[NUM_SCREENS]        = {};
@@ -388,9 +391,18 @@ void ais_display_destroy(int n) {
 // ─── Public: Fetch AIS targets from Signal K REST API ────────────────────────
 void ais_fetch_targets(const char* server_ip, uint16_t server_port) {
     if (!server_ip || server_ip[0] == '\0' || server_port == 0) return;
+    // Don't attempt HTTP when WiFi isn't connected (AP mode) — the request
+    // would block for the full timeout and freeze the display.
+    if (WiFi.status() != WL_CONNECTED) return;
 
     unsigned long now = millis();
-    if (now - g_ais_last_fetch < AIS_FETCH_INTERVAL_MS) return;
+    // Back off on repeated failures: 5s → 10s → 20s → 40s → 60s cap
+    unsigned long interval = AIS_FETCH_INTERVAL_MS;
+    if (g_ais_fail_count > 0) {
+        interval = AIS_FETCH_INTERVAL_MS * (1U << min(g_ais_fail_count, 4));
+        if (interval > AIS_FAIL_BACKOFF_MAX) interval = AIS_FAIL_BACKOFF_MAX;
+    }
+    if (now - g_ais_last_fetch < interval) return;
     g_ais_last_fetch = now;
 
     if (!g_ais_mutex) g_ais_mutex = xSemaphoreCreateMutex();
@@ -398,11 +410,11 @@ void ais_fetch_targets(const char* server_ip, uint16_t server_port) {
     // Fetch own vessel identifier from Signal K (e.g. "vessels.urn:mrn:imo:mmsi:123456789")
     // Cache it — it never changes during a session.
     static String self_key;
-    if (self_key.isEmpty()) {
+    if (self_key.isEmpty() && !g_ais_self_key_failed) {
         HTTPClient hSelf;
         char selfUrl[128];
         snprintf(selfUrl, sizeof(selfUrl), "http://%s:%u/signalk/v1/api/self", server_ip, server_port);
-        hSelf.setTimeout(2000);
+        hSelf.setTimeout(1000);
         hSelf.begin(selfUrl);
         if (hSelf.GET() == 200) {
             self_key = hSelf.getString();
@@ -410,6 +422,9 @@ void ais_fetch_targets(const char* server_ip, uint16_t server_port) {
             // Strip leading "vessels." prefix so it matches the key in /vessels
             if (self_key.startsWith("vessels.")) self_key = self_key.substring(8);
             Serial.printf("[AIS] Own vessel key: %s\n", self_key.c_str());
+        } else {
+            g_ais_self_key_failed = true;  // don't retry every cycle
+            Serial.println("[AIS] self-key fetch failed, will retry after backoff");
         }
         hSelf.end();
     }
@@ -417,13 +432,19 @@ void ais_fetch_targets(const char* server_ip, uint16_t server_port) {
     HTTPClient http;
     char url[128];
     snprintf(url, sizeof(url), "http://%s:%u/signalk/v1/api/vessels", server_ip, server_port);
-    http.setTimeout(3000);
+    http.setTimeout(1500);
     http.begin(url);
     int httpCode = http.GET();
     if (httpCode != 200) {
         http.end();
+        g_ais_fail_count++;
+        if (g_ais_fail_count == 1) Serial.printf("[AIS] vessels fetch failed (%d), backing off\n", httpCode);
         return;
     }
+
+    // Success — reset failure tracking
+    g_ais_fail_count = 0;
+    g_ais_self_key_failed = false;
 
     String payload = http.getString();
     http.end();

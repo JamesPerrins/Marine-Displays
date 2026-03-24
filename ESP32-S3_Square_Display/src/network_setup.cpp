@@ -1,16 +1,4 @@
-// ...existing code...
-
-#include "gauge_config.h"
-#include <Arduino.h>
-#include <WiFi.h>
-#include <WebServer.h>
-#include <ESPmDNS.h>
-#include <Preferences.h>
-#include <vector>
-#include <set>
-#include "network_setup.h"
 #include "signalk_config.h"
-#include "gauge_config.h"
 #include "screen_config_c_api.h"
 #include "ui_Settings.h"
 #include <FS.h>
@@ -22,9 +10,6 @@
 #include <esp_ota_ops.h>
 #include "TCA9554PWR.h"
 
-// ...existing code...
-
-// Place fallback/error screen logic after all includes and config loads
 extern "C" void show_fallback_error_screen_if_needed() {
     // A screen is considered configured if ANY of the following are non-default:
     //   - display_type != GAUGE (NUMBER/DUAL/QUAD/GRAPH/COMPASS/POSITION have no cal points)
@@ -67,16 +52,13 @@ extern "C" void show_fallback_error_screen_if_needed() {
         lv_obj_align(overlay, LV_ALIGN_CENTER, 0, 0);
         lv_obj_t *label = lv_label_create(overlay);
         lv_obj_set_style_text_color(label, lv_color_white(), LV_PART_MAIN);
-        lv_label_set_text(label, "No config loaded.\nConnect to WiFi:\nESP32-SquareDisplay\nThen open 192.168.4.1");
+        lv_label_set_text(label, "ERROR: No valid config loaded.\nCheck SD card or NVS.\n\nConnect to WiFi AP:\nESP32-SquareDisplay\nThen open 192.168.4.1");
         lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
         #endif
     }
 }
 
-// ...existing code...
-
 #include "gauge_config.h"
-
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -100,6 +82,14 @@ extern "C" void show_fallback_error_screen_if_needed() {
 #include <esp_err.h>
 #include "esp_log.h"
 #include "needle_style.h"
+#include "TCA9554PWR.h"
+#include "ui_Settings.h"
+#include <vector>
+#include <set>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <Update.h>
+#include <esp_ota_ops.h>
 
 static const char *TAG_SETUP = "network_setup";
 
@@ -230,9 +220,10 @@ void handle_assets_page();
 void handle_assets_upload();
 void handle_assets_upload_post();
 void handle_assets_delete();
+// OTA firmware update handlers
 void handle_ota_page();
-void handle_ota_post();
 void handle_ota_upload();
+void handle_ota_post();
 // Hot-update helper (apply backgrounds/icons at runtime)
 extern bool apply_all_screen_visuals();
 
@@ -251,6 +242,13 @@ String signalk_paths[NUM_SCREENS * 2];
 uint16_t auto_scroll_sec = 0;
 // Screen-off timeout in minutes (0 = always on)
 uint16_t screen_off_timeout_min = 0;
+// Connection type and MQTT settings
+ConnType conn_type = CONN_WS;
+String mqtt_broker = "";
+uint16_t mqtt_port = 1883;
+String mqtt_user = "";
+String mqtt_pass = "";
+String mqtt_topic_prefix = "";
 // Skip a single load of preferences when we've just saved, so the UI
 // reflects the in-memory `screen_configs` we just updated instead of
 // reloading possibly-stale NVS values.
@@ -354,6 +352,13 @@ void save_preferences(bool skip_screen_blobs = false) {
             String key = String("skpath_") + i;
             preferences.putString(key.c_str(), signalk_paths[i]);
         }
+        // Save connection type and MQTT settings
+        preferences.putUShort("conn_type", (uint16_t)conn_type);
+        preferences.putString("mqtt_broker", mqtt_broker);
+        preferences.putUShort("mqtt_port", mqtt_port);
+        preferences.putString("mqtt_user", mqtt_user);
+        preferences.putString("mqtt_pass", mqtt_pass);
+        preferences.putString("mqtt_prefix", mqtt_topic_prefix);
         preferences.end();
     }
 
@@ -529,6 +534,28 @@ void save_preferences(bool skip_screen_blobs = false) {
         } else {
             Serial.println("[SD SAVE] Failed to open /config/signalk_paths.txt for writing");
         }
+        // Write wifi/network backup including MQTT settings
+        File wbf = SD_MMC.open("/config/wifi_backup.txt", FILE_WRITE);
+        if (wbf) {
+            wbf.println(saved_ssid);
+            wbf.println(saved_password);
+            wbf.println(saved_signalk_ip);
+            wbf.println(String(saved_signalk_port));
+            wbf.println(saved_hostname);
+            wbf.println(String((int)conn_type));
+            wbf.println(mqtt_broker);
+            wbf.println(String(mqtt_port));
+            wbf.println(mqtt_user);
+            wbf.println(mqtt_pass);
+            wbf.println(mqtt_topic_prefix);
+            wbf.flush();
+            size_t wbf_size = wbf.size();
+            wbf.close();
+            Serial.printf("[SD SAVE] wifi_backup.txt written (%u bytes) conn_type=%u broker='%s'\n",
+                          (unsigned)wbf_size, (unsigned)conn_type, mqtt_broker.c_str());
+        } else {
+            Serial.println("[SD SAVE] Failed to open /config/wifi_backup.txt for writing");
+        }
     }
 } // end save_preferences
 
@@ -563,6 +590,13 @@ void load_preferences() {
             String key = String("skpath_") + i;
             signalk_paths[i] = preferences.getString(key.c_str(), "");
         }
+        // Load connection type and MQTT settings
+        conn_type         = (ConnType)preferences.getUShort("conn_type", (uint16_t)CONN_WS);
+        mqtt_broker       = preferences.getString("mqtt_broker", "");
+        mqtt_port         = preferences.getUShort("mqtt_port", 1883);
+        mqtt_user         = preferences.getString("mqtt_user", "");
+        mqtt_pass         = preferences.getString("mqtt_pass", "");
+        mqtt_topic_prefix = preferences.getString("mqtt_prefix", "");
         preferences.end();
     }
     // Fill in any missing SignalK paths from SD fallback file (per-path, not all-or-nothing)
@@ -585,8 +619,44 @@ void load_preferences() {
             }
         }
     }
-    Serial.printf("[DEBUG] Loaded settings: ssid='%s' password='%s' signalk_ip='%s' port=%u\n",
-                  saved_ssid.c_str(), saved_password.c_str(), saved_signalk_ip.c_str(), saved_signalk_port);
+    Serial.printf("[DEBUG] Loaded settings: ssid='%s' signalk_ip='%s' port=%u\n",
+                  saved_ssid.c_str(), saved_signalk_ip.c_str(), saved_signalk_port);
+
+    // Load wifi/network backup from SD — SD is authoritative and always wins over NVS
+    {
+        const char *bakpath = "/config/wifi_backup.txt";
+        if (SD_MMC.exists(bakpath)) {
+            File bak = SD_MMC.open(bakpath, FILE_READ);
+            if (bak) {
+                String bak_ssid      = bak.readStringUntil('\n'); bak_ssid.trim();
+                String bak_pass      = bak.readStringUntil('\n'); bak_pass.trim();
+                String bak_sk_ip     = bak.readStringUntil('\n'); bak_sk_ip.trim();
+                String bak_sk_port   = bak.readStringUntil('\n'); bak_sk_port.trim();
+                String bak_hostname  = bak.readStringUntil('\n'); bak_hostname.trim();
+                String bak_conn_type = bak.readStringUntil('\n'); bak_conn_type.trim();
+                String bak_broker    = bak.readStringUntil('\n'); bak_broker.trim();
+                String bak_port      = bak.readStringUntil('\n'); bak_port.trim();
+                String bak_user      = bak.readStringUntil('\n'); bak_user.trim();
+                String bak_mqtt_pass = bak.readStringUntil('\n'); bak_mqtt_pass.trim();
+                String bak_prefix    = bak.readStringUntil('\n'); bak_prefix.trim();
+                bak.close();
+                // SD backup always wins — it is written on every save and survives firmware flash
+                if (bak_ssid.length() > 0)           saved_ssid       = bak_ssid;
+                if (bak_pass.length() > 0)            saved_password   = bak_pass;
+                if (bak_sk_ip.length() > 0)           saved_signalk_ip = bak_sk_ip;
+                if (bak_sk_port.toInt() > 0)          saved_signalk_port = (uint16_t)bak_sk_port.toInt();
+                if (bak_hostname.length() > 0)        saved_hostname   = bak_hostname;
+                if (bak_conn_type.length() > 0)       conn_type        = (ConnType)bak_conn_type.toInt();
+                if (bak_broker.length() > 0)          mqtt_broker      = bak_broker;
+                if (bak_port.toInt() > 0)             mqtt_port        = (uint16_t)bak_port.toInt();
+                if (bak_user.length() > 0)            mqtt_user        = bak_user;
+                if (bak_mqtt_pass.length() > 0)       mqtt_pass        = bak_mqtt_pass;
+                if (bak_prefix.length() > 0)          mqtt_topic_prefix = bak_prefix;
+                Serial.printf("[SD LOAD] wifi_backup: conn_type=%u broker='%s' prefix='%s'\n",
+                              (unsigned)conn_type, mqtt_broker.c_str(), mqtt_topic_prefix.c_str());
+            }
+        }
+    }
 
     // Initialize defaults
     for (int s = 0; s < NUM_SCREENS; ++s) {
@@ -1088,10 +1158,6 @@ void handle_gauges_screen() {
             esp_task_wdt_reset();
             config_server.sendContent(html);
             html.clear();
-            // No lv_timer_handler() — fragment is small/fast (~5 KB),
-            // and calling it during HTTP I/O can trigger LVGL DMA flushes
-            // that race with TCP send-buffer allocations, causing crashes
-            // on repeated save→reload cycles.
         }
     };
 
@@ -2140,15 +2206,44 @@ void handle_network_page() {
             "</div>";
     html += "<div id='scanResults' style='margin:0 0 10px 148px;display:none'></div>";
     html += "<div class='form-row'><label>Password:</label><input name='password' type='password' value='" + saved_password + "'></div>";
+
+    // Connection type dropdown
+    html += "<div class='form-row'><label>Connection:</label>"
+            "<select id='conn_type' name='conn_type' onchange='toggleConnFields()'>"
+            "<option value='0'" + String(conn_type==CONN_WS   ?" selected":"") + ">WebSocket</option>"
+            "<option value='2'" + String(conn_type==CONN_MQTT ?" selected":"") + ">MQTT</option>"
+            "<option value='3'" + String(conn_type==CONN_MQTTS?" selected":"") + ">MQTT (TLS)</option>"
+            "</select></div>";
+
+    // SignalK fields (hidden when MQTT selected)
+    html += "<div id='sk_fields'>";
     html += "<div class='form-row'><label>SignalK Server:</label><input name='signalk_ip' type='text' value='" + saved_signalk_ip + "'></div>";
     html += "<div class='form-row'><label>SignalK Port:</label><input name='signalk_port' type='number' value='" + String(saved_signalk_port) + "'></div>";
+    html += "</div>";
+
+    // MQTT fields (hidden when WS selected)
+    html += "<div id='mqtt_fields'>";
+    html += "<div class='form-row'><label>MQTT Broker:</label><input name='mqtt_broker' type='text' value='" + mqtt_broker + "'></div>";
+    html += "<div class='form-row'><label>MQTT Port:</label><input name='mqtt_port' type='number' value='" + String(mqtt_port) + "'></div>";
+    html += "<div class='form-row'><label>MQTT User:</label><input name='mqtt_user' type='text' value='" + mqtt_user + "'></div>";
+    html += "<div class='form-row'><label>MQTT Password:</label><input name='mqtt_pass' type='password' value='" + mqtt_pass + "'></div>";
+    html += "<div class='form-row'><label>Topic Prefix:</label><input name='mqtt_prefix' type='text' value='" + mqtt_topic_prefix + "' style='width:60%' placeholder='N/signalk/&lt;systemId&gt;/vessels/self'></div>";
+    html += "</div>";
+
     html += "<div class='form-row'><label>ESP32 Hostname:</label><input name='hostname' type='text' value='" + saved_hostname + "'></div>";
     html += "<div style='text-align:center;margin-top:12px;'><button class='tab-btn' type='submit' style='padding:10px 18px;'>Save & Reboot</button></div>";
     html += "</form>";
     html += "<p style='text-align:center; margin-top:10px;'><a href='/'>Back</a></p>";
 
-    // JavaScript for WiFi scanning
+    // JavaScript for WiFi scanning and connection type toggle
     html += "<script>"
+            "function toggleConnFields(){"
+              "var v=parseInt(document.getElementById('conn_type').value);"
+              "var mqtt=v>=2;"
+              "document.getElementById('sk_fields').style.display=mqtt?'none':'';"
+              "document.getElementById('mqtt_fields').style.display=mqtt?'':'none';"
+            "}"
+            "toggleConnFields();"
             "function scanWifi(){"
               "var btn=document.getElementById('scanBtn');"
               "var div=document.getElementById('scanResults');"
@@ -2189,13 +2284,21 @@ void handle_save_wifi() {
         saved_signalk_ip = config_server.arg("signalk_ip");
         saved_signalk_port = config_server.arg("signalk_port").toInt();
         saved_hostname = config_server.arg("hostname");
+        // Parse connection type and MQTT settings
+        conn_type = (ConnType)config_server.arg("conn_type").toInt();
+        if (config_server.hasArg("mqtt_broker")) mqtt_broker = config_server.arg("mqtt_broker");
+        if (config_server.hasArg("mqtt_port"))   mqtt_port   = (uint16_t)config_server.arg("mqtt_port").toInt();
+        if (config_server.hasArg("mqtt_user"))   mqtt_user   = config_server.arg("mqtt_user");
+        if (config_server.hasArg("mqtt_pass"))   mqtt_pass   = config_server.arg("mqtt_pass");
+        if (config_server.hasArg("mqtt_prefix")) mqtt_topic_prefix = config_server.arg("mqtt_prefix");
+        if (mqtt_port == 0) mqtt_port = 1883;
         save_preferences();
         Serial.println("[WiFi Config] SSID: " + saved_ssid);
-        Serial.println("[WiFi Config] Password: " + saved_password);
         Serial.println("[WiFi Config] SignalK IP: " + saved_signalk_ip);
-        Serial.print("[WiFi Config] SignalK Port: ");
-        Serial.println(saved_signalk_port);
+        Serial.printf("[WiFi Config] SignalK Port: %u\n", saved_signalk_port);
         Serial.println("[WiFi Config] Hostname: " + saved_hostname);
+        Serial.printf("[WiFi Config] conn_type=%u mqtt_broker='%s' mqtt_port=%u\n",
+                      (unsigned)conn_type, mqtt_broker.c_str(), mqtt_port);
         String html = "<html><head>";
         html += STYLE;
         html += "<title>Saved</title></head><body><div class='container'>";
@@ -2216,19 +2319,17 @@ void handle_device_page() {
     html += "<div class='tab-content'>";
     html += "<h2>Device Settings</h2>";
     html += "<form method='POST' action='/save-device'>";
-    // Buzzer mode
-    html += "<div class='form-row'><label>Buzzer Mode:</label><select name='buzzer_mode'>";
+    // Buzzer mode + cooldown on one row
+    html += "<div class='form-row'><label>Buzzer:</label><select name='buzzer_mode'>";
     html += "<option value='0'" + String(buzzer_mode==0?" selected":"") + ">Off</option>";
     html += "<option value='1'" + String(buzzer_mode==1?" selected":"") + ">Global</option>";
     html += "<option value='2'" + String(buzzer_mode==2?" selected":"") + ">Per-screen</option>";
-    html += "</select></div>";
-    // Buzzer cooldown (dropdown matching screen options)
-    html += "<div class='form-row'><label>Buzzer Cooldown:</label><select name='buzzer_cooldown'>";
+    html += "</select><select name='buzzer_cooldown'>";
     html += "<option value='0'" + String(buzzer_cooldown_sec==0?" selected":"") + ">Constant</option>";
-    html += "<option value='5'" + String(buzzer_cooldown_sec==5?" selected":"") + ">5s</option>";
-    html += "<option value='10'" + String(buzzer_cooldown_sec==10?" selected":"") + ">10s</option>";
-    html += "<option value='30'" + String(buzzer_cooldown_sec==30?" selected":"") + ">30s</option>";
-    html += "<option value='60'" + String(buzzer_cooldown_sec==60?" selected":"") + ">60s</option>";
+    html += "<option value='5'" + String(buzzer_cooldown_sec==5?" selected":"") + ">5s pause</option>";
+    html += "<option value='10'" + String(buzzer_cooldown_sec==10?" selected":"") + ">10s pause</option>";
+    html += "<option value='30'" + String(buzzer_cooldown_sec==30?" selected":"") + ">30s pause</option>";
+    html += "<option value='60'" + String(buzzer_cooldown_sec==60?" selected":"") + ">60s pause</option>";
     html += "</select></div>";
     // Auto-scroll (dropdown matching screen options)
     html += "<div class='form-row'><label>Auto-scroll:</label><select name='auto_scroll'>";
@@ -2239,7 +2340,7 @@ void handle_device_page() {
     html += "<option value='60'" + String(auto_scroll_sec==60?" selected":"") + ">60s</option>";
     html += "</select></div>";
     // Screen off timeout
-    html += "<div class='form-row'><label>Screen Off:</label><select name='screen_off_timeout'>";
+    html += "<div class='form-row'><label>Screen Sleep:</label><select name='screen_off_timeout'>";
     html += "<option value='0'"  + String(screen_off_timeout_min==0 ?" selected":"") + ">Always on</option>";
     html += "<option value='1'"  + String(screen_off_timeout_min==1 ?" selected":"") + ">1 min</option>";
     html += "<option value='5'"  + String(screen_off_timeout_min==5 ?" selected":"") + ">5 min</option>";
@@ -2302,7 +2403,8 @@ void handle_save_device() {
         auto_scroll_sec = asc;
         // Apply auto-scroll at runtime
         set_auto_scroll_interval(auto_scroll_sec);
-        
+
+
         // Screen off timeout
         uint16_t sot = (uint16_t)config_server.arg("screen_off_timeout").toInt();
         // Only accept the allowed values; anything else → always on
@@ -2543,6 +2645,66 @@ uint16_t get_signalk_server_port() {
 String get_signalk_path_by_index(int idx) {
     if (idx >= 0 && idx < NUM_SCREENS * 2) return signalk_paths[idx];
     return "";
+}
+
+// Get SignalK paths needed by a single screen (0-based index)
+std::vector<String> get_signalk_paths_for_screen(int s) {
+    std::vector<String> paths;
+    std::set<String> unique;
+    if (s < 0 || s >= NUM_SCREENS) return paths;
+
+    auto add = [&](const char* p) {
+        String ps(p);
+        if (ps.length() > 0 && unique.find(ps) == unique.end()) {
+            unique.insert(ps);
+            paths.push_back(ps);
+        }
+    };
+
+    // Gauge paths (top = s*2, bottom = s*2+1)
+    add(signalk_paths[s * 2].c_str());
+    add(signalk_paths[s * 2 + 1].c_str());
+
+    switch (screen_configs[s].display_type) {
+        case DISPLAY_TYPE_GAUGE:
+            break;
+        case DISPLAY_TYPE_NUMBER:
+            add(screen_configs[s].number_path);
+            break;
+        case DISPLAY_TYPE_DUAL:
+            add(screen_configs[s].dual_top_path);
+            add(screen_configs[s].dual_bottom_path);
+            break;
+        case DISPLAY_TYPE_QUAD:
+            add(screen_configs[s].quad_tl_path);
+            add(screen_configs[s].quad_tr_path);
+            add(screen_configs[s].quad_bl_path);
+            add(screen_configs[s].quad_br_path);
+            break;
+        case DISPLAY_TYPE_GAUGE_NUMBER:
+            add(screen_configs[s].gauge_num_center_path);
+            break;
+        case DISPLAY_TYPE_GRAPH:
+            add(screen_configs[s].number_path);  // primary series uses number_path
+            add(screen_configs[s].graph_path_2);
+            break;
+        case DISPLAY_TYPE_COMPASS:
+            add(screen_configs[s].number_path);  // heading path
+            add(screen_configs[s].quad_bl_path); // BL extra field
+            add(screen_configs[s].quad_br_path); // BR extra field
+            break;
+        case DISPLAY_TYPE_POSITION:
+            add("navigation.position");
+            add("navigation.datetime");
+            break;
+        case DISPLAY_TYPE_AIS:
+            add("navigation.position");
+            add("navigation.datetime");
+            add("navigation.courseOverGroundTrue");
+            add("navigation.speedOverGround");
+            break;
+    }
+    return paths;
 }
 
 // Get all configured SignalK paths including gauges, number displays, and dual displays
@@ -2902,6 +3064,7 @@ void handle_ota_post() {
     }
     html += "</div></body></html>";
     config_server.send(ok ? 200 : 500, "text/html", html);
+
     if (ok) {
         // Flush TCP before we kill the radio — client must receive the page first.
         config_server.client().flush();
@@ -2928,14 +3091,14 @@ void handle_ota_page() {
     // Show running partition and free space so the user can sanity-check
     const esp_partition_t* running = esp_ota_get_running_partition();
     const esp_partition_t* next    = esp_ota_get_next_update_partition(NULL);
-    char info[120];
+    char info[128];
     snprintf(info, sizeof(info),
-        "Running: %s @ 0x%06lX (%lu KB) &nbsp;|&nbsp; Update target: %s @ 0x%06lX",
-        running ? running->label : "?",
-        running ? (unsigned long)running->address : 0UL,
-        running ? (unsigned long)(running->size / 1024) : 0UL,
-        next    ? next->label : "none",
-        next    ? (unsigned long)next->address : 0UL);
+             "Running: %s @ 0x%06lX (%lu KB) — Next: %s @ 0x%06lX",
+             running ? running->label : "?",
+             running ? (unsigned long)running->address : 0UL,
+             running ? (unsigned long)(running->size / 1024) : 0UL,
+             next    ? next->label : "none",
+             next    ? (unsigned long)next->address : 0UL);
 
     String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'>";
     html += STYLE;

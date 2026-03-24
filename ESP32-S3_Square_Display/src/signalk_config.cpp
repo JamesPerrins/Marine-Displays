@@ -1,5 +1,6 @@
 #include "signalk_config.h"
 #include "network_setup.h"
+#include "screen_config_c_api.h"
 #include <WiFi.h>
 #include <esp_wifi.h>
 #include <WebSocketsClient.h>
@@ -9,6 +10,10 @@
 #include "esp_task_wdt.h"
 #include <esp_heap_caps.h>
 #include <map>
+#include <set>
+#include <vector>
+
+extern "C" int ui_get_current_screen(void);
 
 // STL allocator that places all nodes in PSRAM instead of iRAM.
 template <typename T>
@@ -72,6 +77,7 @@ String g_sensor_display_names[TOTAL_PARAMS]; // Signal K meta.displayName
 volatile float g_nav_latitude  = NAN;
 volatile float g_nav_longitude = NAN;
 char g_nav_datetime[32]        = {0};
+char g_sk_datetime[32]         = {0};  // SK writes here; RTC sync reads it
 
 // Extended storage for paths beyond the gauge array (number displays, dual displays)
 // Uses PSRAM allocator to keep map nodes out of iRAM.
@@ -87,6 +93,7 @@ static uint16_t server_port_num = 0;
 static String signalk_paths[TOTAL_PARAMS];  // Array of 10 paths
 static TaskHandle_t signalk_task_handle = NULL;
 static bool signalk_enabled = false;
+
 // Set by HTTP handler (Core 1) before building/sending the config page.
 // signalk_task (Core 0) sees this, disconnects the WS, and suspends reconnects
 // until the flag is cleared on save — freeing the ~22KB WS receive buffer.
@@ -105,6 +112,9 @@ static const unsigned long RECONNECT_BASE_MS = 2000;
 static const unsigned long RECONNECT_MAX_MS = 60000;
 static const unsigned long MESSAGE_TIMEOUT_MS = 120000; // 120s without messages => reconnect (long enough for web page generation)
 static const unsigned long PING_INTERVAL_MS = 15000; // send periodic ping
+
+// Forward declaration for active-screen path collection
+static std::vector<String> get_active_screen_paths(int screen_1based);
 
 // Outgoing message queue (simple ring buffer)
 static SemaphoreHandle_t ws_queue_mutex = NULL;
@@ -261,6 +271,32 @@ float get_sensor_value_by_path(const String& path) {
     }
     
     return NAN;
+}
+
+void load_signalk_paths() {
+    for (int i = 0; i < TOTAL_PARAMS; i++) {
+        signalk_paths[i] = get_signalk_path_by_index(i);
+    }
+}
+
+// Route an incoming value (from MQTT or any non-WS source) by SK path string.
+// Matches gauge slots first; falls back to the extended sensor map.
+void update_signalk_value(const char* path, float value) {
+    if (!path || path[0] == '\0') return;
+    last_message_time = millis();
+    bool found_in_gauge = false;
+    for (int i = 0; i < TOTAL_PARAMS; i++) {
+        if (signalk_paths[i].length() > 0 && signalk_paths[i].equals(path)) {
+            set_sensor_value(i, value);
+            found_in_gauge = true;
+        }
+    }
+    if (!found_in_gauge) {
+        if (sensor_mutex != NULL && xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(50))) {
+            extended_sensor_values[String(path)] = value;
+            xSemaphoreGive(sensor_mutex);
+        }
+    }
 }
 
 // Get sensor unit by path
@@ -424,9 +460,10 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
         last_message_time = millis();
         // reset backoff on successful connect
         current_backoff_ms = RECONNECT_BASE_MS;
-        // Build subscription JSON for ALL configured paths (gauge, number, dual, quad, gauge+num, graph)
+        // Subscribe only to paths for the active screen (+ background graph screens)
         // Manual string build avoids DynamicJsonDocument's 2048B iRAM alloc in the WS connect handler.
-        std::vector<String> all_conn_paths = get_all_signalk_paths();
+        int active_scr = ui_get_current_screen();  // 1-based
+        std::vector<String> all_conn_paths = get_active_screen_paths(active_scr);
         String out = "{\"context\":\"vessels.self\",\"subscribe\":[";
         bool first_conn = true;
         for (const String& p : all_conn_paths) {
@@ -482,12 +519,12 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
                     // navigation.datetime arrives as an ISO-8601 string
                     if (strcmp(path, "navigation.datetime") == 0) {
                         const char* dt = val["value"].as<const char*>();
-                        if (dt) strncpy(g_nav_datetime, dt, 31);
+                        if (dt) { strncpy(g_sk_datetime, dt, 31); g_sk_datetime[31] = '\0'; }
                         continue;
                     }
 
                     float value = val["value"].as<float>();
-                    
+
                     // Check if this path matches any gauge path
                     bool found_in_gauge = false;
                     for (int i = 0; i < TOTAL_PARAMS; i++) {
@@ -513,17 +550,20 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
     }
 }
 
+// Helper: begin WS connection
+static void ws_begin_connection() {
+    ws_client.begin(server_ip_str.c_str(), server_port_num, "/signalk/v1/stream");
+    ws_client.onEvent(wsEvent);
+}
+
 // FreeRTOS task for Signal K updates (runs on core 0)
-// Task to run the WebSocket loop
+// FreeRTOS task for Signal K WebSocket updates (runs on core 0)
 static void signalk_task(void *parameter) {
-    Serial.println("Signal K WebSocket task started");
+    Serial.println("Signal K task started (WebSocket)");
     vTaskDelay(pdMS_TO_TICKS(500));
 
     while (signalk_enabled) {
-        // Config UI pause: the HTTP handler (Core 1) sets g_signalk_ws_paused before
-        // building/sending the ~144KB gauges page. We disconnect here (Core 0, the only
-        // thread that safely owns ws_client) to free the ~22KB WS receive buffer, giving
-        // the SD DMA layer enough contiguous iRAM to write configs after the page send.
+        // Config UI pause
         if (g_signalk_ws_paused) {
             if (ws_client.isConnected()) {
                 ws_client.disconnect();
@@ -540,44 +580,33 @@ static void signalk_task(void *parameter) {
             continue;
         }
 
+        // CRITICAL: ws_client.loop() may fire wsEvent() which sets
+        // last_message_time = millis(). We MUST sample `now` AFTER loop()
+        // so that `now - last_message_time` doesn't underflow to ~4 billion.
         ws_client.loop();
-        // Drain any messages queued from other tasks (e.g. refresh_signalk_subscriptions
-        // called from the HTTP handler on Core 1). Only safe to call sendTXT() from here.
         flush_outgoing();
 
         unsigned long now = millis();
 
-        // send periodic ping if connected
         if (ws_client.isConnected()) {
             if (now - last_message_time >= PING_INTERVAL_MS) {
                 ws_client.sendPing();
             }
-        }
-
-        // detect silent drop: no messages/pongs for MESSAGE_TIMEOUT_MS
-        if (ws_client.isConnected()) {
             if (now - last_message_time >= MESSAGE_TIMEOUT_MS) {
                 Serial.println("Signal K: connection idle timeout, forcing disconnect");
                 ws_client.disconnect();
-                // schedule reconnect with current_backoff_ms + jitter
-                unsigned int jitter = (esp_random() & 0x7FF) % 1000; // up to 1s jitter
+                unsigned int jitter = (esp_random() & 0x7FF) % 1000;
                 next_reconnect_at = now + current_backoff_ms + jitter;
                 last_reconnect_attempt = now;
-                // increase backoff for next time
                 current_backoff_ms = min(current_backoff_ms * 2, RECONNECT_MAX_MS);
             }
         } else {
-            // Not connected: attempt reconnect when scheduled
             if (next_reconnect_at == 0) {
-                // first time; schedule immediate try
                 next_reconnect_at = now + current_backoff_ms;
             }
             if (now >= next_reconnect_at) {
-                // re-init client
-                ws_client.begin(server_ip_str.c_str(), server_port_num, "/signalk/v1/stream");
-                ws_client.onEvent(wsEvent);
+                ws_begin_connection();
                 last_reconnect_attempt = now;
-                // schedule next if this fails
                 unsigned int jitter = (esp_random() & 0x7FF) % 1000;
                 next_reconnect_at = now + current_backoff_ms + jitter;
                 current_backoff_ms = min(current_backoff_ms * 2, RECONNECT_MAX_MS);
@@ -587,7 +616,7 @@ static void signalk_task(void *parameter) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
-    Serial.println("Signal K WebSocket task ended");
+    Serial.println("Signal K task ended");
     vTaskDelete(NULL);
 }
 
@@ -623,22 +652,15 @@ void enable_signalk(const char* ssid, const char* password, const char* server_i
         signalk_enabled = false;
         return;
     }
-    Serial.println("Signal K: Starting WebSocket client...");
 
-    // Initialize websocket client
-    ws_client.begin(server_ip_str.c_str(), server_port_num, "/signalk/v1/stream");
-    ws_client.onEvent(wsEvent);
-    // We'll manage reconnection with backoff ourselves
+    Serial.println("Signal K: Starting WebSocket client...");
+    ws_begin_connection();
     ws_client.setReconnectInterval(0);
 
-    // Create task to pump ws loop.
-    // NOTE: xTaskCreateStaticPinnedToCore with a PSRAM stack fails with
-    // "xPortcheckValidStackMem" assert unless CONFIG_FREERTOS_TASK_STACK_IN_PSRAM
-    // is set in sdkconfig at IDF build time — a pre-compiled library check that
-    // a -D flag cannot override.  Use xTaskCreatePinnedToCore (internal RAM stack).
+    // Create task to pump connection loop
     xTaskCreatePinnedToCore(signalk_task, "SignalKWS", 8192, NULL, 3, &signalk_task_handle, 0);
 
-    Serial.println("Signal K WebSocket task created successfully");
+    Serial.println("Signal K task created successfully");
     Serial.flush();
 }
 
@@ -650,7 +672,7 @@ void disable_signalk() {
         signalk_task_handle = NULL;
     }
     ws_client.disconnect();
-    Serial.println("Signal K disabled (WebSocket disconnected)");
+    Serial.println("Signal K disabled");
 }
 
 // Returns true if the WS is currently paused.
@@ -712,6 +734,58 @@ void schedule_signalk_ws_resume() {
     Serial.println("[SK] WS resume deferred until after screen rebuild");
 }
 
+// Helper: collect paths for active screen + background graph screens
+static std::vector<String> get_active_screen_paths(int screen_1based) {
+    std::set<String> seen_paths;
+    std::vector<String> result;
+    int active_idx = screen_1based - 1;
+    if (active_idx < 0) active_idx = 0;
+
+    auto merge = [&](const std::vector<String>& src) {
+        for (const String& p : src) {
+            if (p.length() > 0 && seen_paths.find(p) == seen_paths.end()) {
+                seen_paths.insert(p);
+                result.push_back(p);
+            }
+        }
+    };
+
+    // Active screen paths
+    merge(get_signalk_paths_for_screen(active_idx));
+
+    // Background graph screens still need data collection
+    for (int s = 0; s < NUM_SCREENS; s++) {
+        if (s == active_idx) continue;
+        if (screen_configs[s].display_type == DISPLAY_TYPE_GRAPH) {
+            merge(get_signalk_paths_for_screen(s));
+        }
+    }
+    return result;
+}
+
+// Subscribe to only the given screen's paths (+ background graph screens)
+void subscribe_to_active_screen(int screen_1based) {
+    std::vector<String> paths = get_active_screen_paths(screen_1based);
+
+    // First unsubscribe from everything
+    String unsub = "{\"context\":\"vessels.self\",\"unsubscribe\":[{\"path\":\"*\"}]}";
+    enqueue_outgoing(unsub);
+
+    // Then subscribe to only what we need
+    String out = "{\"context\":\"vessels.self\",\"subscribe\":[";
+    bool first = true;
+    for (const String& p : paths) {
+        if (!first) out += ",";
+        out += "{\"path\":\"";
+        out += p;
+        out += "\",\"period\":0}";
+        first = false;
+    }
+    out += "]}";
+    enqueue_outgoing(out);
+    Serial.printf("[SK] Subscribed to %d paths for screen %d\n", (int)paths.size(), screen_1based);
+}
+
 // Rebuild the subscription list from current configuration and (re)send it
 // over the active WebSocket connection if connected. If the WS is not
 // connected, the updated paths will be used when connection is (re)established.
@@ -720,15 +794,20 @@ void refresh_signalk_subscriptions() {
     for (int i = 0; i < TOTAL_PARAMS; i++) {
         signalk_paths[i] = get_signalk_path_by_index(i);
     }
-    
-    // Get all unique paths including number and dual displays
-    std::vector<String> all_paths = get_all_signalk_paths();
+
+    // Subscribe to active screen paths (not all paths)
+    int active = ui_get_current_screen();
+    std::vector<String> all_paths = get_active_screen_paths(active);
 
     // Build subscription JSON manually to avoid DynamicJsonDocument allocating
     // 2048 bytes from internal iRAM on every save. DynamicJsonDocument uses malloc()
     // which draws from the internal heap; on a device with ~10 KB iRAM headroom this
     // fragments the heap and leaves the SDMMC DMA layer without a contiguous block.
     // Manual string building uses PSRAM-backed Arduino String objects instead.
+    // Unsubscribe first, then subscribe to active paths only.
+    String unsub = "{\"context\":\"vessels.self\",\"unsubscribe\":[{\"path\":\"*\"}]}";
+    enqueue_outgoing(unsub);
+
     String out = "{\"context\":\"vessels.self\",\"subscribe\":[";
     bool first = true;
     for (const String& path : all_paths) {

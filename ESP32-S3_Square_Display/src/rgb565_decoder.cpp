@@ -154,13 +154,22 @@ static lv_res_t decoder_open(lv_img_decoder_t * decoder, lv_img_decoder_dsc_t * 
                 return LV_RES_INV;
             }
             
-            // Read all data at once
-            uint32_t bytes_read;
-            res = lv_fs_read(&f, buf, file_size, &bytes_read);
+            // Read in chunks to handle short DMA reads when iRAM is tight
+            // (e.g. during SSL connections that consume internal DMA buffers)
+            uint32_t total_read = 0;
+            const uint32_t CHUNK = 8192;
+            while (total_read < file_size) {
+                uint32_t to_read = file_size - total_read;
+                if (to_read > CHUNK) to_read = CHUNK;
+                uint32_t chunk_read = 0;
+                res = lv_fs_read(&f, buf + total_read, to_read, &chunk_read);
+                if (res != LV_FS_RES_OK || chunk_read == 0) break;
+                total_read += chunk_read;
+            }
             lv_fs_close(&f);
             
-            if(res != LV_FS_RES_OK || bytes_read != file_size) {
-                LV_LOG_ERROR("Failed to read file data: read %d of %d bytes", bytes_read, file_size);
+            if(total_read != file_size) {
+                LV_LOG_ERROR("Failed to read file data: read %d of %d bytes", total_read, file_size);
                 heap_caps_free(buf);
                 return LV_RES_INV;
             }

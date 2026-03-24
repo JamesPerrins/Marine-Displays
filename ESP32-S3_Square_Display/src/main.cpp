@@ -15,6 +15,7 @@ bool test_mode = false;
 #include "signalk_config.h"
 #include "screen_config_c_api.h"
 #include "network_setup.h"
+#include "mqtt_config.h"
 #include "gauge_config.h"
 #include "needle_style.h"
 #include "number_display.h"
@@ -26,6 +27,7 @@ bool test_mode = false;
 #include "compass_display.h"
 #include "ais_display.h"
 #include "unit_convert.h"
+#include "RTC_PCF85063.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -1001,6 +1003,11 @@ void setup() {
     ets_printf("*** I2C+expander done ***\r\n");
     Serial.println("I2C and IO expander initialized");
     Serial.flush();
+
+    // Initialize the on-board RTC (PCF85063) for local timekeeping
+    PCF85063_Init();
+    Serial.println("RTC (PCF85063) initialized");
+    Serial.flush();
     
     // Shared SPI bus initialization (used by ST7701 command SPI and SDSPI)
     {
@@ -1170,23 +1177,39 @@ void setup() {
         ets_printf("[HEAP] *** CORRUPTION detected AFTER setup_network ***\r\n");
     }
     
-    // Start Signal K only if server is actually configured
-    Serial.println("Checking Signal K configuration...");
+    // Start data connection — MQTT or WebSocket depending on conn_type
+    Serial.println("Checking data connection configuration...");
     Serial.flush();
-    String sk_ip = get_signalk_server_ip();
-    Serial.print("Signal K Server IP: '");
-    Serial.print(sk_ip);
-    Serial.println("'");
-    Serial.flush();
-    
-    if (sk_ip.length() > 0 && is_wifi_connected()) {
-        Serial.println("Starting Signal K...");
-        Serial.flush();
-        enable_signalk("", "", sk_ip.c_str(), get_signalk_server_port());
+
+    if (conn_type >= CONN_MQTT) {
+        if (mqtt_broker.length() > 0 && is_wifi_connected()) {
+            Serial.printf("Starting MQTT — broker=%s port=%u prefix='%s'\n",
+                          mqtt_broker.c_str(), mqtt_port, mqtt_topic_prefix.c_str());
+            Serial.flush();
+            load_signalk_paths();
+            enable_mqtt(mqtt_broker.c_str(), mqtt_port,
+                        mqtt_user.c_str(), mqtt_pass.c_str(),
+                        mqtt_topic_prefix.c_str());
+        } else {
+            Serial.println("MQTT not configured yet or WiFi not connected");
+            Serial.println("Connect to web UI to configure MQTT broker");
+            Serial.flush();
+        }
     } else {
-        Serial.println("Signal K not configured yet");
-        Serial.println("Connect to web UI to configure Signal K server");
+        String sk_ip = get_signalk_server_ip();
+        Serial.print("Signal K Server IP: '");
+        Serial.print(sk_ip);
+        Serial.println("'");
         Serial.flush();
+        if (sk_ip.length() > 0 && is_wifi_connected()) {
+            Serial.println("Starting Signal K...");
+            Serial.flush();
+            enable_signalk("", "", sk_ip.c_str(), get_signalk_server_port());
+        } else {
+            Serial.println("Signal K not configured yet");
+            Serial.println("Connect to web UI to configure Signal K server");
+            Serial.flush();
+        }
     }
     
     Serial.println("Display initialized with WiFi optimizations.");
@@ -1214,6 +1237,52 @@ void loop() {
             Set_Backlight(0);
             WiFi.setSleep(true);
             Serial.println("[SCREEN] Screen off — power saving active");
+        }
+    }
+    // -------------------------------------------------------------------------
+
+    // --- RTC is the sole clock source for display ----------------------------
+    // RTC drives g_nav_datetime every second.
+    // SK datetime (g_sk_datetime) only syncs TO the RTC at startup and then
+    // every 10 minutes — it never touches g_nav_datetime directly.
+    {
+        static uint32_t last_rtc_read_ms   = 0;
+        static uint32_t last_rtc_sync_ms   = 0;
+        static char     prev_sk_datetime[32] = {0};
+        uint32_t now = millis();
+
+        // Sync SignalK → RTC when a new SK datetime arrives (at startup + every 10 min)
+        if (g_sk_datetime[0] != '\0' &&
+            strcmp(g_sk_datetime, prev_sk_datetime) != 0 &&
+            (now - last_rtc_sync_ms > 600000UL || last_rtc_sync_ms == 0))
+        {
+            int yr, mo, dy, hr, mn, sc;
+            if (sscanf(g_sk_datetime, "%d-%d-%dT%d:%d:%d", &yr, &mo, &dy, &hr, &mn, &sc) == 6) {
+                datetime_t rtc_time = {};
+                rtc_time.year   = (uint16_t)yr;
+                rtc_time.month  = (uint8_t)mo;
+                rtc_time.day    = (uint8_t)dy;
+                rtc_time.hour   = (uint8_t)hr;
+                rtc_time.minute = (uint8_t)mn;
+                rtc_time.second = (uint8_t)sc;
+                PCF85063_Set_All(rtc_time);
+                last_rtc_sync_ms = now;
+                Serial.printf("[RTC] Synced from SignalK: %04d-%02d-%02dT%02d:%02d:%02d\n",
+                              yr, mo, dy, hr, mn, sc);
+            }
+            strncpy(prev_sk_datetime, g_sk_datetime, 31);
+        }
+
+        // Read RTC every second — this is the ONLY writer to g_nav_datetime
+        if (now - last_rtc_read_ms >= 1000) {
+            last_rtc_read_ms = now;
+            datetime_t t;
+            PCF85063_Read_Time(&t);
+            if (t.year >= 2024) {
+                snprintf(g_nav_datetime, sizeof(g_nav_datetime),
+                         "%04d-%02d-%02dT%02d:%02d:%02dZ",
+                         t.year, t.month, t.day, t.hour, t.minute, t.second);
+            }
         }
     }
     // -------------------------------------------------------------------------
@@ -1284,6 +1353,9 @@ void loop() {
                 if (top_needle) needle_anim_cb(top_needle, last_top_angle[current_screen]);
                 if (bottom_needle) lower_needle_anim_cb(bottom_needle, last_bottom_angle[current_screen]);
                 last_seen_screen = current_screen;
+
+                // Re-subscribe to only the active screen's SignalK paths
+                subscribe_to_active_screen(current_screen);
 
                 // If a save happened while this screen was inactive, re-apply its visuals
                 // NOW while it is active so LVGL actually renders them.
@@ -1599,7 +1671,6 @@ void loop() {
         }
     }
 
-    // Maintain TCA9554 PIN6 LOW (buzzer OFF, active-HIGH circuit) every 50ms.
     // Buzzer safety maintenance — runs for both v3 and v4 every 50 ms.
     // After a crash-reboot the I2C bus can be mid-transaction so the direction
     // write in setup() silently fails, leaving BEE_EN/PIN6 as OUTPUT HIGH.

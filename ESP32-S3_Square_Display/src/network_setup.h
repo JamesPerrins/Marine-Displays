@@ -10,6 +10,23 @@
 #include "calibration_types.h"
 extern GaugeCalibrationPoint gauge_cal[NUM_SCREENS][2][5];
 
+// Connection type: which transport to use for data
+enum ConnType : uint8_t {
+    CONN_WS    = 0,  // Plain WebSocket (SignalK)
+    CONN_MQTT  = 2,  // Plain MQTT
+    CONN_MQTTS = 3   // MQTT over TLS
+};
+
+// Current connection type
+extern ConnType conn_type;
+
+// MQTT settings
+extern String mqtt_broker;
+extern uint16_t mqtt_port;
+extern String mqtt_user;
+extern String mqtt_pass;
+extern String mqtt_topic_prefix;
+
 // Global synchronous web server instance (WebServer — handleClient() called
 // from loop() on Core 1; HTTP handlers also run on Core 1).
 extern WebServer config_server;
@@ -59,6 +76,9 @@ uint16_t get_signalk_server_port();
 // Get/set configured Signal K path by index (0-9)
 String get_signalk_path_by_index(int index);
 void set_signalk_path_by_index(int index, const String& path);
+
+// Get Signal K paths needed by a single screen (0-based index)
+std::vector<String> get_signalk_paths_for_screen(int screen_idx);
 
 // Get all configured Signal K paths (gauges, number displays, dual displays) - unique only
 std::vector<String> get_all_signalk_paths();

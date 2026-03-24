@@ -32,6 +32,8 @@ lv_obj_t *ui_AutoScrollDrop = NULL;
 lv_obj_t *ui_AutoScrollLabel = NULL;
 lv_obj_t *ui_BuzzerCooldownDrop = NULL;
 lv_obj_t *ui_BuzzerCooldownLabel = NULL;
+static lv_obj_t *ui_ScreenOffDrop = NULL;
+static lv_obj_t *ui_ScreenOffLabel = NULL;
 
 // Timer to periodically sync settings with values (in case web page changes them)
 static lv_timer_t *settings_refresh_timer = NULL;
@@ -178,6 +180,16 @@ extern "C" void update_settings_values(void)
     // Update brightness dropdown
     if (ui_BrightnessDrop != NULL) {
         lv_dropdown_set_selected(ui_BrightnessDrop, brightness_level);
+    }
+
+    // Update screen off timeout dropdown
+    if (ui_ScreenOffDrop != NULL) {
+        uint16_t sel = 0;
+        if (screen_off_timeout_min == 1) sel = 1;
+        else if (screen_off_timeout_min == 5) sel = 2;
+        else if (screen_off_timeout_min == 10) sel = 3;
+        else if (screen_off_timeout_min == 30) sel = 4;
+        lv_dropdown_set_selected(ui_ScreenOffDrop, sel);
     }
 
 
@@ -372,20 +384,20 @@ extern "C" void ui_Settings_screen_init(void)
     lv_obj_set_style_text_font(title, LV_FONT_DEFAULT, 0);
 #endif
     
-    // Buzzer label (static) and dropdown on same line
+    // Buzzer label + mode dropdown + cooldown dropdown all on one line
     ui_BuzzerLabel = lv_label_create(ui_SettingsPanel);
     lv_label_set_text(ui_BuzzerLabel, "Buzzer:");
     lv_obj_set_style_text_color(ui_BuzzerLabel, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_set_x(ui_BuzzerLabel, -70);
+    lv_obj_set_x(ui_BuzzerLabel, -155);
     lv_obj_set_y(ui_BuzzerLabel, -40);
     lv_obj_set_align(ui_BuzzerLabel, LV_ALIGN_CENTER);
 
-    // Buzzer mode dropdown (Off / Global / Per-screen) inline with label
+    // Buzzer mode dropdown (Off / Global / Per-screen)
     ui_BuzzerSwitch = lv_dropdown_create(ui_SettingsPanel);
     lv_dropdown_set_options(ui_BuzzerSwitch, "Off\nGlobal\nPer-screen");
-    lv_obj_set_width(ui_BuzzerSwitch, 140);
+    lv_obj_set_width(ui_BuzzerSwitch, 120);
     lv_obj_set_height(ui_BuzzerSwitch, 32);
-    lv_obj_set_x(ui_BuzzerSwitch, 40);
+    lv_obj_set_x(ui_BuzzerSwitch, -55);
     lv_obj_set_y(ui_BuzzerSwitch, -40);
     lv_obj_set_align(ui_BuzzerSwitch, LV_ALIGN_CENTER);
     lv_obj_add_event_cb(ui_BuzzerSwitch, buzzer_switch_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
@@ -401,20 +413,13 @@ extern "C" void ui_Settings_screen_init(void)
     // Apply loaded state to dropdown (label is static)
     lv_dropdown_set_selected(ui_BuzzerSwitch, (uint16_t)buzzer_mode);
 
-    // Buzzer cooldown label + dropdown (inline-ish below buzzer control)
-    ui_BuzzerCooldownLabel = lv_label_create(ui_SettingsPanel);
-    lv_label_set_text(ui_BuzzerCooldownLabel, "Cooldown Timer:");
-    lv_obj_set_style_text_color(ui_BuzzerCooldownLabel, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_set_x(ui_BuzzerCooldownLabel, -100);
-    lv_obj_set_y(ui_BuzzerCooldownLabel, 20);
-    lv_obj_set_align(ui_BuzzerCooldownLabel, LV_ALIGN_CENTER);
-
+    // Buzzer cooldown dropdown (same line as mode, no separate label)
     ui_BuzzerCooldownDrop = lv_dropdown_create(ui_SettingsPanel);
-    lv_dropdown_set_options(ui_BuzzerCooldownDrop, "Constant\n5s\n10s\n30s\n60s");
-    lv_obj_set_width(ui_BuzzerCooldownDrop, 140);
+    lv_dropdown_set_options(ui_BuzzerCooldownDrop, "Constant\n5s pause\n10s pause\n30s pause\n60s pause");
+    lv_obj_set_width(ui_BuzzerCooldownDrop, 110);
     lv_obj_set_height(ui_BuzzerCooldownDrop, 32);
-    lv_obj_set_x(ui_BuzzerCooldownDrop, 40);
-    lv_obj_set_y(ui_BuzzerCooldownDrop, 20);
+    lv_obj_set_x(ui_BuzzerCooldownDrop, 80);
+    lv_obj_set_y(ui_BuzzerCooldownDrop, -40);
     lv_obj_set_align(ui_BuzzerCooldownDrop, LV_ALIGN_CENTER);
 
     // Map persisted seconds to dropdown index
@@ -494,12 +499,12 @@ extern "C" void ui_Settings_screen_init(void)
     lv_obj_set_y(ui_RSSILabel, -100);
     lv_obj_set_align(ui_RSSILabel, LV_ALIGN_CENTER);
     
-    // Auto-scroll dropdown (placed above the instruction)
+    // Auto-scroll dropdown
     ui_AutoScrollLabel = lv_label_create(ui_SettingsPanel);
     lv_label_set_text(ui_AutoScrollLabel, "Auto-scroll:");
     lv_obj_set_style_text_color(ui_AutoScrollLabel, lv_color_hex(0xFFFFFF), 0);
     lv_obj_set_x(ui_AutoScrollLabel, -80);
-    lv_obj_set_y(ui_AutoScrollLabel, 80);
+    lv_obj_set_y(ui_AutoScrollLabel, 20);
     lv_obj_set_align(ui_AutoScrollLabel, LV_ALIGN_CENTER);
 
     ui_AutoScrollDrop = lv_dropdown_create(ui_SettingsPanel);
@@ -507,7 +512,7 @@ extern "C" void ui_Settings_screen_init(void)
     lv_obj_set_width(ui_AutoScrollDrop, 140);
     lv_obj_set_height(ui_AutoScrollDrop, 32);
     lv_obj_set_x(ui_AutoScrollDrop, 40);
-    lv_obj_set_y(ui_AutoScrollDrop, 80);
+    lv_obj_set_y(ui_AutoScrollDrop, 20);
     lv_obj_set_align(ui_AutoScrollDrop, LV_ALIGN_CENTER);
 
     // Set current selection from persisted value
@@ -536,7 +541,54 @@ extern "C" void ui_Settings_screen_init(void)
         set_auto_scroll_interval(sec);
     }, LV_EVENT_VALUE_CHANGED, NULL);
 
-    // Brightness dropdown (between auto-scroll and instruction)
+    // Screen Off timeout dropdown
+    ui_ScreenOffLabel = lv_label_create(ui_SettingsPanel);
+    lv_label_set_text(ui_ScreenOffLabel, "Screen Sleep:");
+    lv_obj_set_style_text_color(ui_ScreenOffLabel, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_x(ui_ScreenOffLabel, -100);
+    lv_obj_set_y(ui_ScreenOffLabel, 80);
+    lv_obj_set_align(ui_ScreenOffLabel, LV_ALIGN_CENTER);
+
+    ui_ScreenOffDrop = lv_dropdown_create(ui_SettingsPanel);
+    lv_dropdown_set_options(ui_ScreenOffDrop, "Always on\n1 min\n5 min\n10 min\n30 min");
+    lv_obj_set_width(ui_ScreenOffDrop, 140);
+    lv_obj_set_height(ui_ScreenOffDrop, 32);
+    lv_obj_set_x(ui_ScreenOffDrop, 40);
+    lv_obj_set_y(ui_ScreenOffDrop, 80);
+    lv_obj_set_align(ui_ScreenOffDrop, LV_ALIGN_CENTER);
+
+    // Set current selection from persisted value
+    {
+        uint16_t so_sel = 0;
+        if (screen_off_timeout_min == 1) so_sel = 1;
+        else if (screen_off_timeout_min == 5) so_sel = 2;
+        else if (screen_off_timeout_min == 10) so_sel = 3;
+        else if (screen_off_timeout_min == 30) so_sel = 4;
+        lv_dropdown_set_selected(ui_ScreenOffDrop, so_sel);
+    }
+
+    // Event handler: persist and apply screen off timeout
+    lv_obj_add_event_cb(ui_ScreenOffDrop, [](lv_event_t *e){
+        lv_obj_t *dd = lv_event_get_target(e);
+        uint16_t idx = lv_dropdown_get_selected(dd);
+        uint16_t mins = 0;
+        if (idx == 1) mins = 1;
+        else if (idx == 2) mins = 5;
+        else if (idx == 3) mins = 10;
+        else if (idx == 4) mins = 30;
+        screen_off_timeout_min = mins;
+        // Persist to NVS
+        Preferences p;
+        if (p.begin("settings", false)) {
+            p.putUShort("screen_off_tmout", mins);
+            p.end();
+        }
+        // Reset activity timer so the new timeout starts from now
+        extern uint32_t g_last_activity_ms;
+        g_last_activity_ms = millis();
+    }, LV_EVENT_VALUE_CHANGED, NULL);
+
+    // Brightness dropdown
     ui_BrightnessLevelLabel = lv_label_create(ui_SettingsPanel);
     lv_label_set_text(ui_BrightnessLevelLabel, "Brightness:");
     lv_obj_set_style_text_color(ui_BrightnessLevelLabel, lv_color_hex(0xFFFFFF), 0);
@@ -550,10 +602,6 @@ extern "C" void ui_Settings_screen_init(void)
     lv_obj_set_x(ui_BrightnessDrop, 40);
     lv_obj_set_y(ui_BrightnessDrop, 130);
     lv_obj_set_align(ui_BrightnessDrop, LV_ALIGN_CENTER);
-    lv_obj_set_style_text_font(ui_BrightnessDrop, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_bg_color(ui_BrightnessDrop, lv_color_hex(0x333333), 0);
-    lv_obj_set_style_text_color(ui_BrightnessDrop, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_set_style_border_color(ui_BrightnessDrop, lv_color_hex(0x555555), 0);
 
     // Load brightness level from NVS
     {

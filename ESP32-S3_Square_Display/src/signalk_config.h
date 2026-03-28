@@ -99,6 +99,9 @@ void load_signalk_paths();
 // Route an incoming value (from MQTT or any non-WS source) to the correct
 // gauge slot or extended sensor map by SK path string.
 void update_signalk_value(const char* path, float value);
+// Returns millis() timestamp of last successful update_signalk_value() call.
+// 0 = no data received yet.
+uint32_t get_last_data_update_ms();
 
 // Enqueue an outgoing message to be sent when WS is connected
 void enqueue_signalk_message(const String &msg);

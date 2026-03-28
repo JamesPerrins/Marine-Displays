@@ -116,7 +116,7 @@ static unsigned long next_reconnect_at = 0;
 static unsigned long current_backoff_ms = 2000; // start 2s
 static const unsigned long RECONNECT_BASE_MS = 2000;
 static const unsigned long RECONNECT_MAX_MS = 60000;
-static const unsigned long MESSAGE_TIMEOUT_MS = 120000; // 120s without messages => reconnect (long enough for web page generation)
+static const unsigned long MESSAGE_TIMEOUT_MS = 30000; // 30s without messages => reconnect (ping is every 15s, so 30s means 2 missed pongs)
 static const unsigned long PING_INTERVAL_MS = 15000; // send periodic ping
 
 // Forward declaration for active-screen path collection
@@ -554,9 +554,20 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
             }
         }
     }
-    // handle pong or ping responses if available
     if (type == WStype_PONG) {
         last_message_time = millis();
+    }
+
+    if (type == WStype_DISCONNECTED) {
+        Serial.println("[SK] WebSocket disconnected — will reconnect");
+        current_backoff_ms = RECONNECT_BASE_MS;
+        next_reconnect_at = millis() + RECONNECT_BASE_MS;
+    }
+
+    if (type == WStype_ERROR) {
+        Serial.println("[SK] WebSocket error — will reconnect");
+        current_backoff_ms = RECONNECT_BASE_MS;
+        next_reconnect_at = millis() + RECONNECT_BASE_MS;
     }
 }
 

@@ -6,22 +6,12 @@ uint8_t gt911_addr = GT911_ADDR_PRIMARY;
 
 struct GT911_Touch touch_data = {0};
 
-// Rate-limit noisy I2C error messages (every 5 seconds max)
-static unsigned long last_i2c_err_log = 0;
-#define I2C_ERR_LOG_INTERVAL_MS 5000
-
-
 bool I2C_Read_Touch(uint8_t Driver_addr, uint16_t Reg_addr, uint8_t *Reg_data, uint32_t Length)
 {
   Wire.beginTransmission(Driver_addr);
-  Wire.write((uint8_t)(Reg_addr >> 8)); 
-  Wire.write((uint8_t)Reg_addr);         
+  Wire.write((uint8_t)(Reg_addr >> 8));
+  Wire.write((uint8_t)Reg_addr);
   if ( Wire.endTransmission(true)){
-    unsigned long now = millis();
-    if (now - last_i2c_err_log >= I2C_ERR_LOG_INTERVAL_MS) {
-      last_i2c_err_log = now;
-      printf("[TOUCH] I2C Read failed (addr=0x%02X, reg=0x%04X)\r\n", Driver_addr, Reg_addr);
-    }
     return false;
   }
   Wire.requestFrom(Driver_addr, Length);
@@ -40,11 +30,6 @@ bool I2C_Write_Touch(uint8_t Driver_addr, uint16_t Reg_addr, const uint8_t *Reg_
   }
   if ( Wire.endTransmission(true))
   {
-    unsigned long now = millis();
-    if (now - last_i2c_err_log >= I2C_ERR_LOG_INTERVAL_MS) {
-      last_i2c_err_log = now;
-      printf("[TOUCH] I2C Write failed (addr=0x%02X, reg=0x%04X)\r\n", Driver_addr, Reg_addr);
-    }
     return false;
   }
   return true;

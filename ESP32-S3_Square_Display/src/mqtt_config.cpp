@@ -183,10 +183,12 @@ static void mqtt_task(void* param) {
 
     s_mqtt_client.setServer(s_broker.c_str(), s_port);
     s_mqtt_client.setCallback(mqtt_callback);
-    s_mqtt_client.setBufferSize(512);
+    s_mqtt_client.setBufferSize(5000);  // >4096 forces PSRAM alloc, away from task stacks in DRAM
+    s_mqtt_client.setSocketTimeout(3);  // 3s max — enough for TCP connect, well under 5s WDT
 
     while (s_mqtt_enabled) {
         esp_task_wdt_reset();
+
 
         if (s_mqtt_paused) {
             if (s_mqtt_client.connected()) {
@@ -213,6 +215,7 @@ static void mqtt_task(void* param) {
                 if (mqtt_connect()) {
                     last_keepalive = millis();
                 }
+                esp_task_wdt_reset();  // connect+subscribe+keepalive chain can take up to 3s each
             }
         } else {
             unsigned long now = millis();
@@ -226,8 +229,8 @@ static void mqtt_task(void* param) {
             }
         }
 
+        vTaskDelay(pdMS_TO_TICKS(10));  // yield to IDLE0 before potentially blocking in loop()
         s_mqtt_client.loop();
-        vTaskDelay(pdMS_TO_TICKS(10));
     }
 
     if (s_mqtt_client.connected()) {

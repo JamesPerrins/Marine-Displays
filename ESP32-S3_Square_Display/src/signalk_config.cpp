@@ -9,33 +9,10 @@
 #include <esp_system.h>
 #include "esp_task_wdt.h"
 #include <esp_heap_caps.h>
-#include <map>
 #include <set>
 #include <vector>
 
 extern "C" int ui_get_current_screen(void);
-
-// STL allocator that places all nodes in PSRAM instead of iRAM.
-template <typename T>
-struct PsramStlAllocator {
-    using value_type = T;
-    PsramStlAllocator() = default;
-    template <class U> PsramStlAllocator(const PsramStlAllocator<U>&) noexcept {}
-    T* allocate(std::size_t n) {
-        void* p = heap_caps_malloc(n * sizeof(T), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!p) throw std::bad_alloc();
-        return static_cast<T*>(p);
-    }
-    void deallocate(T* p, std::size_t) noexcept { heap_caps_free(p); }
-};
-template <class T, class U>
-bool operator==(const PsramStlAllocator<T>&, const PsramStlAllocator<U>&) { return true; }
-template <class T, class U>
-bool operator!=(const PsramStlAllocator<T>&, const PsramStlAllocator<U>&) { return false; }
-
-template <typename K, typename V>
-using PsramMap = std::map<K, V, std::less<K>,
-    PsramStlAllocator<std::pair<const K, V>>>;
 
 // Custom ArduinoJson allocator that uses PSRAM instead of internal RAM.
 // Saves ~4 KB of iRAM on every SK WebSocket message parse.
@@ -79,12 +56,39 @@ volatile float g_nav_longitude = NAN;
 char g_nav_datetime[32]        = {0};
 char g_sk_datetime[32]         = {0};  // SK writes here; RTC sync reads it
 
-// Extended storage for paths beyond the gauge array (number displays, dual displays)
-// Uses PSRAM allocator to keep map nodes out of iRAM.
-static PsramMap<String, float> extended_sensor_values;
-static PsramMap<String, String> extended_sensor_units;
-static PsramMap<String, String> extended_sensor_descriptions;
-static PsramMap<String, String> extended_sensor_display_names;
+// Extended storage for paths beyond the gauge array (number/dual displays).
+// Fixed-size array in .bss — eliminates all heap allocation for sensor storage,
+// preventing TLSF free-block corruption from adjacent allocations/frees.
+#define MAX_EXT_SENSORS 64
+struct ExtSensorEntry {
+    char  path[80];       // SK path (dot-notation)
+    float value;          // last received value
+    char  unit[16];       // e.g. "K", "Pa", "rpm"
+    char  desc[56];       // description
+    char  disp_name[56];  // displayName
+};
+static ExtSensorEntry s_ext_sensors[MAX_EXT_SENSORS];
+static int            s_ext_count = 0;
+
+// Both helpers require sensor_mutex to be held by the caller.
+static int ext_find(const char* path) {
+    for (int i = 0; i < s_ext_count; i++) {
+        if (strcmp(s_ext_sensors[i].path, path) == 0) return i;
+    }
+    return -1;
+}
+static int ext_find_or_insert(const char* path) {
+    int idx = ext_find(path);
+    if (idx >= 0) return idx;
+    if (s_ext_count >= MAX_EXT_SENSORS) return -1;
+    strncpy(s_ext_sensors[s_ext_count].path, path, sizeof(s_ext_sensors[0].path) - 1);
+    s_ext_sensors[s_ext_count].path[sizeof(s_ext_sensors[0].path) - 1] = '\0';
+    s_ext_sensors[s_ext_count].value        = NAN;
+    s_ext_sensors[s_ext_count].unit[0]      = '\0';
+    s_ext_sensors[s_ext_count].desc[0]      = '\0';
+    s_ext_sensors[s_ext_count].disp_name[0] = '\0';
+    return s_ext_count++;
+}
 
 // WiFi and HTTP client (static to this file)
 static WebSocketsClient ws_client;
@@ -249,8 +253,8 @@ String get_sensor_display_name_by_path(const String& path) {
 
     // Check extended storage
     if (sensor_mutex != NULL && xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(50))) {
-        auto it = extended_sensor_display_names.find(path);
-        String dn = (it != extended_sensor_display_names.end()) ? it->second : "";
+        int idx = ext_find(path.c_str());
+        String dn = (idx >= 0) ? String(s_ext_sensors[idx].disp_name) : "";
         xSemaphoreGive(sensor_mutex);
         return dn;
     }
@@ -270,12 +274,11 @@ float get_sensor_value_by_path(const String& path) {
     
     // Check extended storage
     if (sensor_mutex != NULL && xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(50))) {
-        auto it = extended_sensor_values.find(path);
-        float val = (it != extended_sensor_values.end()) ? it->second : NAN;
+        int idx = ext_find(path.c_str());
+        float val = (idx >= 0) ? s_ext_sensors[idx].value : NAN;
         xSemaphoreGive(sensor_mutex);
         return val;
     }
-    
     return NAN;
 }
 
@@ -300,8 +303,11 @@ void update_signalk_value(const char* path, float value) {
     }
     if (!found_in_gauge) {
         if (sensor_mutex != NULL && xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(50))) {
-            extended_sensor_values[String(path)] = value;
-            s_last_any_update_ms = (uint32_t)millis();
+            int idx = ext_find_or_insert(path);
+            if (idx >= 0) {
+                s_ext_sensors[idx].value = value;
+                s_last_any_update_ms = (uint32_t)millis();
+            }
             xSemaphoreGive(sensor_mutex);
         }
     }
@@ -320,12 +326,11 @@ String get_sensor_unit_by_path(const String& path) {
     
     // Check extended storage
     if (sensor_mutex != NULL && xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(50))) {
-        auto it = extended_sensor_units.find(path);
-        String unit = (it != extended_sensor_units.end()) ? it->second : "";
+        int idx = ext_find(path.c_str());
+        String unit = (idx >= 0) ? String(s_ext_sensors[idx].unit) : "";
         xSemaphoreGive(sensor_mutex);
         return unit;
     }
-    
     return "";
 }
 
@@ -342,12 +347,11 @@ String get_sensor_description_by_path(const String& path) {
     
     // Check extended storage
     if (sensor_mutex != NULL && xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(50))) {
-        auto it = extended_sensor_descriptions.find(path);
-        String desc = (it != extended_sensor_descriptions.end()) ? it->second : "";
+        int idx = ext_find(path.c_str());
+        String desc = (idx >= 0) ? String(s_ext_sensors[idx].desc) : "";
         xSemaphoreGive(sensor_mutex);
         return desc;
     }
-    
     return "";
 }
 
@@ -441,9 +445,12 @@ void fetch_all_metadata() {
                     String display_name = doc.containsKey("displayName") ? String(doc["displayName"].as<const char*>()) : String("");
 
                     if (sensor_mutex != NULL && xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(50))) {
-                        if (unit.length()         > 0) extended_sensor_units[path]         = unit;
-                        if (description.length()  > 0) extended_sensor_descriptions[path]  = description;
-                        if (display_name.length() > 0) extended_sensor_display_names[path] = display_name;
+                        int idx = ext_find_or_insert(path.c_str());
+                        if (idx >= 0) {
+                            if (unit.length()         > 0) strncpy(s_ext_sensors[idx].unit,      unit.c_str(),         sizeof(s_ext_sensors[0].unit) - 1);
+                            if (description.length()  > 0) strncpy(s_ext_sensors[idx].desc,      description.c_str(),  sizeof(s_ext_sensors[0].desc) - 1);
+                            if (display_name.length() > 0) strncpy(s_ext_sensors[idx].disp_name, display_name.c_str(), sizeof(s_ext_sensors[0].disp_name) - 1);
+                        }
                         xSemaphoreGive(sensor_mutex);
                     }
                 }
@@ -544,10 +551,13 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
                         }
                     }
 
-                    // If not in gauge paths, store in extended map (for number/dual displays)
+                    // If not in gauge paths, store in extended array (for number/dual displays)
                     if (!found_in_gauge && sensor_mutex != NULL && xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(50))) {
-                        extended_sensor_values[String(path)] = value;
-                        s_last_any_update_ms = (uint32_t)millis();
+                        int idx = ext_find_or_insert(path);
+                        if (idx >= 0) {
+                            s_ext_sensors[idx].value = value;
+                            s_last_any_update_ms = (uint32_t)millis();
+                        }
                         xSemaphoreGive(sensor_mutex);
                     }
                 }

@@ -34,6 +34,12 @@ static volatile bool s_mqtt_enabled     = false;
 static volatile bool s_mqtt_connected   = false;
 static volatile bool s_mqtt_paused      = false;
 
+// Static task storage — lives in .bss, never in the heap, so no heap block
+// can be placed adjacent to the stack canary.
+#define MQTT_TASK_STACK_BYTES 16384          // StackType_t = uint8_t on ESP32
+static StaticTask_t s_mqtt_task_tcb;
+static StackType_t  s_mqtt_task_stack[MQTT_TASK_STACK_BYTES];
+
 // ── Extract systemId from topic prefix ────────────────────────────────────
 // Prefix format: "N/signalk/<systemId>/vessels/self"
 // Returns the <systemId> segment, e.g. "23d7359e0d9e"
@@ -183,7 +189,7 @@ static void mqtt_task(void* param) {
 
     s_mqtt_client.setServer(s_broker.c_str(), s_port);
     s_mqtt_client.setCallback(mqtt_callback);
-    s_mqtt_client.setBufferSize(5000);  // >4096 forces PSRAM alloc, away from task stacks in DRAM
+    s_mqtt_client.setBufferSize(2048);  // <4096 = DRAM; stack is 16KB so canary is >13KB away even if buffer is heap-adjacent
     s_mqtt_client.setSocketTimeout(3);  // 3s max — enough for TCP connect, well under 5s WDT
 
     while (s_mqtt_enabled) {
@@ -269,13 +275,14 @@ void enable_mqtt(const char* broker, uint16_t port,
     Serial.printf("[MQTT] Starting — broker=%s port=%u prefix='%s'\n",
                   s_broker.c_str(), s_port, s_topic_prefix.c_str());
 
-    xTaskCreatePinnedToCore(
+    s_mqtt_task_handle = xTaskCreateStaticPinnedToCore(
         mqtt_task,
         "mqtt_task",
-        8192,
+        MQTT_TASK_STACK_BYTES,
         NULL,
         1,
-        &s_mqtt_task_handle,
+        s_mqtt_task_stack,
+        &s_mqtt_task_tcb,
         0   // Core 0 (WiFi/network core)
     );
 }

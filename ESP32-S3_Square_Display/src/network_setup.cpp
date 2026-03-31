@@ -68,6 +68,7 @@ extern "C" void show_fallback_error_screen_if_needed() {
 #include <Preferences.h>
 #include "network_setup.h"
 #include "signalk_config.h"
+#include "mqtt_config.h"
 #include "unit_convert.h"
 #include "gauge_config.h"
 #include "screen_config_c_api.h"
@@ -2179,6 +2180,7 @@ static String rssi_bar(int rssi) {
 }
 
 void handle_network_page() {
+    g_config_page_last_seen = millis();
     String html = "<html><head>";
     html += STYLE;
     html += "<title>Network Setup</title></head><body><div class='container'>";
@@ -2279,6 +2281,7 @@ void handle_network_page() {
 
 
 void handle_save_wifi() {
+    g_config_page_last_seen = millis();
     if (config_server.method() == HTTP_POST) {
         saved_ssid = config_server.arg("ssid");
         saved_password = config_server.arg("password");
@@ -2314,6 +2317,7 @@ void handle_save_wifi() {
 }
 
 void handle_device_page() {
+    g_config_page_last_seen = millis();
     String html = "<html><head>";
     html += STYLE;
     html += "<title>Device Settings</title></head><body><div class='container'>";
@@ -2386,6 +2390,7 @@ void handle_device_page() {
 }
 
 void handle_save_device() {
+    g_config_page_last_seen = millis();
     if (config_server.method() == HTTP_POST) {
         // Read and apply posted values
         int bm = config_server.arg("buzzer_mode").toInt();
@@ -2439,6 +2444,7 @@ void handle_needles_page() {
         config_server.send(405, "text/plain", "Method Not Allowed");
         return;
     }
+    g_config_page_last_seen = millis();
     int screen = 0;
     int gauge = 0;
     if (config_server.hasArg("screen")) screen = config_server.arg("screen").toInt();
@@ -2490,6 +2496,7 @@ void handle_save_needles() {
         config_server.send(405, "text/plain", "Method Not Allowed");
         return;
     }
+    g_config_page_last_seen = millis();
     int screen = config_server.arg("screen").toInt();
     int gauge = config_server.arg("gauge").toInt();
     if (screen < 0) screen = 0; if (screen >= NUM_SCREENS) screen = 0;
@@ -2582,11 +2589,22 @@ void setup_network() {
                                                  : "\nWiFi failed, starting AP mode");
         WiFi.mode(WIFI_AP);
         WiFi.softAP("ESP32-SquareDisplay", "12345678");
+        // Wait for AP interface to be fully assigned its IP before starting
+        // the web server — without this delay softAPIP() can return 0.0.0.0
+        // and HTTP requests arrive before lwIP has bound the interface.
+        {
+            int ap_wait = 0;
+            while (WiFi.softAPIP() == IPAddress(0,0,0,0) && ap_wait < 20) {
+                delay(100);
+                ap_wait++;
+            }
+        }
         // Disable modem sleep in AP mode — keeps the radio awake for pings
         // and web page requests (avoids intermittent packet loss).
         WiFi.setSleep(false);
         Serial.print("AP IP: ");
         Serial.println(WiFi.softAPIP());
+        Serial.println("[AP] Connect to ESP32-SquareDisplay (password: 12345678) then open http://192.168.4.1");
     }
     // Show fallback error screen if needed (after config load, before UI init)
     show_fallback_error_screen_if_needed();
@@ -2617,6 +2635,13 @@ void setup_network() {
     config_server.on("/nvs_test", HTTP_GET, handle_nvs_test);
     config_server.on("/update", HTTP_GET,  handle_ota_page);
     config_server.on("/update", HTTP_POST, handle_ota_post, handle_ota_upload);
+    // Catch-all: redirect any unknown URL to root. Browsers always request
+    // /favicon.ico and other paths; without this the WebServer stalls sending
+    // a 404 which makes some browsers abort the subsequent real request.
+    config_server.onNotFound([]() {
+        config_server.sendHeader("Location", "/", true);
+        config_server.send(302, "text/plain", "");
+    });
     config_server.begin();
     Serial.println("[WebServer] Configuration web UI started on port 80");
     // handleClient() is called from loop() on Core 1.
@@ -2898,6 +2923,7 @@ void handle_nvs_test() {
 
 // Assets manager: list files and show upload form
 void handle_assets_page() {
+    g_config_page_last_seen = millis();
     // Use cached file list — avoids SD scan during HTTP handling (SD/WiFi DMA conflict).
     // Merged icon + bg into a single list for display.
     config_server.setContentLength(CONTENT_LENGTH_UNKNOWN);

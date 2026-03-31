@@ -1719,7 +1719,7 @@ void loop() {
                     && !g_signalk_ws_resume_pending
                     && g_config_page_last_seen != 0
                     && (now_wd - g_config_page_last_seen) >= 10000UL) {
-                Serial.printf("[SK] Config page idle >10s (iRAM=%u), auto-resuming WS\n",
+                Serial.printf("[SK] Config page idle >10s (iRAM=%u), auto-resuming\n",
                               heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
                 g_config_page_last_seen = 0;
                 resume_signalk_ws();

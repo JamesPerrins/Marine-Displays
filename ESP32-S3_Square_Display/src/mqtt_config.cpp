@@ -30,15 +30,12 @@ static String   s_keepalive_payload = "";
 static WiFiClient    s_wifi_client;
 static PubSubClient  s_mqtt_client(s_wifi_client);
 static TaskHandle_t  s_mqtt_task_handle = NULL;
-static volatile bool s_mqtt_enabled     = false;
-static volatile bool s_mqtt_connected   = false;
-static volatile bool s_mqtt_paused      = false;
-
-// Static task storage — lives in .bss, never in the heap, so no heap block
-// can be placed adjacent to the stack canary.
-#define MQTT_TASK_STACK_BYTES 16384          // StackType_t = uint8_t on ESP32
-static StaticTask_t s_mqtt_task_tcb;
-static StackType_t  s_mqtt_task_stack[MQTT_TASK_STACK_BYTES];
+static volatile bool s_mqtt_enabled          = false;
+static volatile bool s_mqtt_connected        = false;
+static volatile bool s_mqtt_paused           = false;
+// Set by resume_mqtt() — task clears s_mqtt_paused when it sees this (same as
+// g_signalk_ws_resume_when_ready in signalk_config.cpp).
+static volatile bool s_mqtt_resume_when_ready = false;
 
 // ── Extract systemId from topic prefix ────────────────────────────────────
 // Prefix format: "N/signalk/<systemId>/vessels/self"
@@ -164,8 +161,6 @@ static bool mqtt_connect() {
         } else {
             s_keepalive_payload = "";
         }
-        // Drain SUBSCRIBE packet from TX buffer before publishing keepalive
-        s_mqtt_client.loop();
         bool ka_ok = s_mqtt_client.publish(s_keepalive_topic.c_str(), s_keepalive_payload.c_str());
         Serial.printf("[MQTT] Keepalive → topic='%s' payload='%s' (%s)\n",
                       s_keepalive_topic.c_str(), s_keepalive_payload.c_str(),
@@ -189,21 +184,24 @@ static void mqtt_task(void* param) {
 
     s_mqtt_client.setServer(s_broker.c_str(), s_port);
     s_mqtt_client.setCallback(mqtt_callback);
-    s_mqtt_client.setBufferSize(2048);  // <4096 = DRAM; stack is 16KB so canary is >13KB away even if buffer is heap-adjacent
-    s_mqtt_client.setSocketTimeout(3);  // 3s max — enough for TCP connect, well under 5s WDT
+    s_mqtt_client.setBufferSize(512);   // SK JSON payloads ~80-150B; 512 covers topic+payload+headers
 
     while (s_mqtt_enabled) {
         esp_task_wdt_reset();
-
 
         if (s_mqtt_paused) {
             if (s_mqtt_client.connected()) {
                 s_mqtt_client.disconnect();
                 s_mqtt_connected = false;
-                Serial.println("[MQTT] Paused for config UI");
+                Serial.println("[MQTT] Config UI active - disconnected");
             }
-            last_reconnect_attempt = millis();
-            vTaskDelay(pdMS_TO_TICKS(50));
+            if (s_mqtt_resume_when_ready) {
+                s_mqtt_resume_when_ready = false;
+                s_mqtt_paused = false;
+                last_reconnect_attempt = millis() - (RECONNECT_INTERVAL_MS - 1000);
+                Serial.println("[MQTT] Unpaused, reconnecting in 1s");
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
 
@@ -235,8 +233,8 @@ static void mqtt_task(void* param) {
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(10));  // yield to IDLE0 before potentially blocking in loop()
         s_mqtt_client.loop();
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 
     if (s_mqtt_client.connected()) {
@@ -258,8 +256,7 @@ void enable_mqtt(const char* broker, uint16_t port,
     s_user         = user         ? user         : "";
     s_pass         = pass         ? pass         : "";
     s_topic_prefix = topic_prefix ? topic_prefix : "";
-    // Strip any trailing slash from the prefix so subscribe/keepalive topics
-    // don't get double slashes (e.g. user entered "vessels/self/")
+    // Strip any trailing slash from the prefix
     while (s_topic_prefix.length() > 0 && s_topic_prefix.endsWith("/")) {
         s_topic_prefix.remove(s_topic_prefix.length() - 1);
     }
@@ -275,31 +272,32 @@ void enable_mqtt(const char* broker, uint16_t port,
     Serial.printf("[MQTT] Starting — broker=%s port=%u prefix='%s'\n",
                   s_broker.c_str(), s_port, s_topic_prefix.c_str());
 
-    s_mqtt_task_handle = xTaskCreateStaticPinnedToCore(
+    xTaskCreatePinnedToCore(
         mqtt_task,
         "mqtt_task",
-        MQTT_TASK_STACK_BYTES,
+        8192,
         NULL,
         1,
-        s_mqtt_task_stack,
-        &s_mqtt_task_tcb,
+        &s_mqtt_task_handle,
         0   // Core 0 (WiFi/network core)
     );
 }
 
 void pause_mqtt() {
     if (!s_mqtt_enabled) return;
+    s_mqtt_resume_when_ready = false;
+    if (s_mqtt_paused) return;
     s_mqtt_paused = true;
-    for (int i = 0; i < 4; i++) vTaskDelay(pdMS_TO_TICKS(25));
-    Serial.printf("[MQTT] Paused, iRAM=%u\n",
-                  heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    Serial.println("[MQTT] Pause signalled");
 }
 
 void resume_mqtt() {
     if (!s_mqtt_enabled) return;
-    s_mqtt_paused = false;
-    Serial.println("[MQTT] Resumed");
+    s_mqtt_resume_when_ready = true;
+    Serial.println("[MQTT] Resume signalled");
 }
+
+bool is_mqtt_paused() { return s_mqtt_paused; }
 
 void disable_mqtt() {
     if (!s_mqtt_enabled) return;
@@ -317,3 +315,4 @@ void disable_mqtt() {
 
 bool is_mqtt_enabled()   { return s_mqtt_enabled; }
 bool is_mqtt_connected() { return s_mqtt_connected; }
+// is_mqtt_paused() defined above alongside pause/resume

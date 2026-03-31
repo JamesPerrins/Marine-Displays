@@ -24,6 +24,9 @@ void pause_mqtt();
 // Allow MQTT to reconnect after config save.
 void resume_mqtt();
 
+// Returns true if MQTT is paused for config UI (same pattern as is_signalk_ws_paused).
+bool is_mqtt_paused();
+
 // Returns true if the MQTT task is running.
 bool is_mqtt_enabled();
 

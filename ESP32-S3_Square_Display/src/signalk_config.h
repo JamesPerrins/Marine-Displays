@@ -92,6 +92,9 @@ void subscribe_to_active_screen(int screen_1based);
 // Fetch metadata for all configured paths (gauges, number, dual displays)
 void fetch_all_metadata();
 
+// Returns millis() timestamp of last successful data update. 0 = no data yet.
+uint32_t get_last_data_update_ms();
+
 // Enqueue an outgoing message to be sent when WS is connected
 void enqueue_signalk_message(const String &msg);
 // Convert value to angle based on parameter type and position

@@ -55,6 +55,9 @@ uint32_t g_last_activity_ms   = 0;   // updated on touch; also used by LVGL_Driv
 static int16_t current_needle_angle = 0;
 static int16_t current_lower_needle_angle = 0;
 
+// Data freshness indicator dot (on lv_layer_top, always visible above all screens)
+static lv_obj_t* s_data_dot = NULL;
+
 // Global needle angle tracking for all screens (1-based: Screen1..Screen5)
 int16_t last_top_angle[6] = {0, 0, 0, 0, 0, 0};     // [screen] - all start at 0°
 int16_t last_bottom_angle[6] = {0, 180, 180, 180, 180, 180};  // [screen] - all start at 180°
@@ -1177,6 +1180,20 @@ void setup() {
         Serial.flush();
     }
     
+    // Data freshness dot — top-right corner, above all screens
+    {
+        lv_obj_t* layer = lv_layer_top();
+        s_data_dot = lv_obj_create(layer);
+        lv_obj_set_size(s_data_dot, 18, 18);
+        lv_obj_set_pos(s_data_dot, SCREEN_WIDTH - 18 - 8, 8);  // top-right corner
+        lv_obj_set_style_radius(s_data_dot, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(s_data_dot, lv_color_hex(0x606060), 0);  // gray = no data yet
+        lv_obj_set_style_bg_opa(s_data_dot, LV_OPA_90, 0);
+        lv_obj_set_style_border_width(s_data_dot, 0, 0);
+        lv_obj_set_style_pad_all(s_data_dot, 0, 0);
+        lv_obj_clear_flag(s_data_dot, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    }
+
     Serial.println("Display initialized with WiFi optimizations.");
     Serial.print("WiFi SSID: ");
     Serial.println(WiFi.SSID());
@@ -1610,6 +1627,43 @@ void loop() {
         // connect→disconnect→TIME_WAIT cycle that crashes the next fragment.
         // The 10-second idle watchdog below handles resuming WS after the user
         // stops accessing the config page.
+    }
+
+    // Data freshness indicator: update dot colour + blink
+    if (s_data_dot) {
+        enum DotState : uint8_t { DS_NEVER, DS_FLASH, DS_LIVE, DS_STALE };
+        static DotState last_dot_state = DS_NEVER;
+        static uint32_t last_blink_ms  = 0;
+        static bool     blink_on       = true;
+
+        uint32_t last_upd = get_last_data_update_ms();
+        uint32_t now_ms   = (uint32_t)millis();
+
+        DotState state;
+        if (last_upd == 0) {
+            state = DS_NEVER;
+        } else {
+            uint32_t age = now_ms - last_upd;
+            if      (age <   500) state = DS_FLASH;
+            else if (age < 30000) state = DS_LIVE;
+            else                  state = DS_STALE;
+        }
+        if (state != last_dot_state) {
+            lv_color_t col;
+            switch (state) {
+                case DS_FLASH: col = lv_color_hex(0x00FF40); break;  // bright green
+                case DS_LIVE:  col = lv_color_hex(0x00A030); break;  // green
+                case DS_STALE: col = lv_color_hex(0xFF2020); break;  // red
+                default:       col = lv_color_hex(0x606060); break;  // gray
+            }
+            lv_obj_set_style_bg_color(s_data_dot, col, 0);
+            last_dot_state = state;
+        }
+        if (now_ms - last_blink_ms >= 500) {
+            blink_on = !blink_on;
+            last_blink_ms = now_ms;
+            lv_obj_set_style_bg_opa(s_data_dot, blink_on ? LV_OPA_90 : LV_OPA_20, 0);
+        }
     }
 
     Lvgl_Loop();

@@ -178,6 +178,10 @@ float get_sensor_value(int index) {
     return val;
 }
 
+// Timestamp of most recent data update. 0 = no data received yet.
+static volatile uint32_t s_last_any_update_ms = 0;
+uint32_t get_last_data_update_ms() { return s_last_any_update_ms; }
+
 // Thread-safe setter for any sensor value
 void set_sensor_value(int index, float value) {
     if (index < 0 || index >= TOTAL_PARAMS) return;
@@ -486,13 +490,15 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
                         if (signalk_paths[i].length() > 0 && signalk_paths[i].equals(path)) {
                             set_sensor_value(i, value);
                             found_in_gauge = true;
+                            s_last_any_update_ms = (uint32_t)millis();
                             // Don't break - continue to update ALL matching path indices
                         }
                     }
-                    
+
                     // If not in gauge paths, store in extended map (for number/dual displays)
                     if (!found_in_gauge && sensor_mutex != NULL && xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(50))) {
                         extended_sensor_values[String(path)] = value;
+                        s_last_any_update_ms = (uint32_t)millis();
                         xSemaphoreGive(sensor_mutex);
                     }
                 }

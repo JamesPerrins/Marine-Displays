@@ -28,6 +28,7 @@ static lv_obj_t* get_screen_obj(int screen_num) {
 EXT_RAM_ATTR static char prev_gauge_num_center_text[NUM_SCREENS][64];
 EXT_RAM_ATTR static char prev_gauge_num_center_unit[NUM_SCREENS][32];
 EXT_RAM_ATTR static char prev_gauge_num_center_description[NUM_SCREENS][128];
+EXT_RAM_ATTR static char prev_gauge_num_center_display_name[NUM_SCREENS][128];
 
 // Font size to LVGL font mapping
 static const lv_font_t* get_font_for_size(uint8_t size) {
@@ -145,12 +146,13 @@ void gauge_number_display_create(int screen_num,
     lv_obj_add_flag(gauge_num_center_unit_labels[screen_num], LV_OBJ_FLAG_IGNORE_LAYOUT);
     
     // Clear previous values
-    prev_gauge_num_center_text[screen_num][0] = '\0';
-    prev_gauge_num_center_unit[screen_num][0] = '\0';
-    prev_gauge_num_center_description[screen_num][0] = '\0';
+    prev_gauge_num_center_text[screen_num][0]         = '\0';
+    prev_gauge_num_center_unit[screen_num][0]         = '\0';
+    prev_gauge_num_center_description[screen_num][0]  = '\0';
+    prev_gauge_num_center_display_name[screen_num][0] = '\0';
 }
 
-void gauge_number_display_update_center(int screen_num, float value, const char* unit, const char* description) {
+void gauge_number_display_update_center(int screen_num, float value, const char* unit, const char* description, const char* display_name) {
     if (screen_num < 0 || screen_num >= NUM_SCREENS) return;
     if (!gauge_num_center_labels[screen_num]) return;
     
@@ -178,11 +180,15 @@ void gauge_number_display_update_center(int screen_num, float value, const char*
         lv_obj_align_to(gauge_num_center_unit_labels[screen_num], gauge_num_center_labels[screen_num], LV_ALIGN_OUT_RIGHT_MID, 10, 0);
     }
     
-    if (strcmp(description, prev_gauge_num_center_description[screen_num]) != 0) {
-        // Convert description to acronym (e.g., "Apparent wind speed" -> "AWS")
-        String acronym = description_to_acronym(description);
-        lv_label_set_text(gauge_num_center_description_labels[screen_num], acronym.c_str());
-        strncpy(prev_gauge_num_center_description[screen_num], description, sizeof(prev_gauge_num_center_description[screen_num]) - 1);
+    const char* safe_dn = (display_name && display_name[0] != '\0') ? display_name : "";
+    if (strcmp(description, prev_gauge_num_center_description[screen_num]) != 0 ||
+        strcmp(safe_dn,    prev_gauge_num_center_display_name[screen_num]) != 0) {
+        // Prefer Signal K meta.displayName; fall back to acronym from description
+        String label = (safe_dn[0] != '\0') ? String(safe_dn)
+                                             : description_to_acronym(description);
+        lv_label_set_text(gauge_num_center_description_labels[screen_num], label.c_str());
+        strncpy(prev_gauge_num_center_description[screen_num],  description, sizeof(prev_gauge_num_center_description[screen_num])  - 1);
+        strncpy(prev_gauge_num_center_display_name[screen_num], safe_dn,     sizeof(prev_gauge_num_center_display_name[screen_num]) - 1);
     }
 }
 
@@ -200,7 +206,8 @@ void gauge_number_display_destroy(int screen_num) {
     gauge_num_center_description_labels[screen_num] = nullptr;
     
     // Clear previous values
-    prev_gauge_num_center_text[screen_num][0] = '\0';
-    prev_gauge_num_center_unit[screen_num][0] = '\0';
-    prev_gauge_num_center_description[screen_num][0] = '\0';
+    prev_gauge_num_center_text[screen_num][0]         = '\0';
+    prev_gauge_num_center_unit[screen_num][0]         = '\0';
+    prev_gauge_num_center_description[screen_num][0]  = '\0';
+    prev_gauge_num_center_display_name[screen_num][0] = '\0';
 }

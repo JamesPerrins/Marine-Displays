@@ -55,8 +55,9 @@ uint32_t g_last_activity_ms   = 0;   // updated on touch; also used by LVGL_Driv
 static int16_t current_needle_angle = 0;
 static int16_t current_lower_needle_angle = 0;
 
-// Data freshness indicator dot (on lv_layer_top, always visible above all screens)
-static lv_obj_t* s_data_dot = NULL;
+// Data freshness indicator dot — one per screen, created in setup() after ui_init().
+// Using lv_layer_top() intercepts gestures; per-screen children do not.
+static lv_obj_t* s_data_dots[5] = {nullptr};
 
 // Global needle angle tracking for all screens (1-based: Screen1..Screen5)
 int16_t last_top_angle[6] = {0, 0, 0, 0, 0, 0};     // [screen] - all start at 0°
@@ -1193,18 +1194,24 @@ void setup() {
         Serial.flush();
     }
     
-    // Data freshness dot — top-right corner, above all screens
+    // Create data freshness dots — one per screen, as children of each screen.
+    // NOT on lv_layer_top() which intercepts gesture events and breaks swiping.
     {
-        lv_obj_t* layer = lv_layer_top();
-        s_data_dot = lv_obj_create(layer);
-        lv_obj_set_size(s_data_dot, 18, 18);
-        lv_obj_set_pos(s_data_dot, SCREEN_WIDTH - 18 - 8, 8);  // top-right corner
-        lv_obj_set_style_radius(s_data_dot, LV_RADIUS_CIRCLE, 0);
-        lv_obj_set_style_bg_color(s_data_dot, lv_color_hex(0x606060), 0);  // gray = no data yet
-        lv_obj_set_style_bg_opa(s_data_dot, LV_OPA_90, 0);
-        lv_obj_set_style_border_width(s_data_dot, 0, 0);
-        lv_obj_set_style_pad_all(s_data_dot, 0, 0);
-        lv_obj_clear_flag(s_data_dot, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_t* screens[5] = { ui_Screen1, ui_Screen2, ui_Screen3, ui_Screen4, ui_Screen5 };
+        for (int i = 0; i < 5; i++) {
+            if (!screens[i]) continue;
+            lv_obj_t* dot = lv_obj_create(screens[i]);
+            lv_obj_set_size(dot, 14, 14);
+            lv_obj_align(dot, LV_ALIGN_TOP_RIGHT, -8, 8);
+            lv_obj_clear_flag(dot, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_clear_flag(dot, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_bg_color(dot, lv_color_hex(0x606060), 0);
+            lv_obj_set_style_bg_opa(dot, LV_OPA_90, 0);
+            lv_obj_set_style_border_width(dot, 0, 0);
+            lv_obj_set_style_pad_all(dot, 0, 0);
+            s_data_dots[i] = dot;
+        }
     }
 
     Serial.println("Display initialized with WiFi optimizations.");
@@ -1642,8 +1649,8 @@ void loop() {
         // stops accessing the config page.
     }
 
-    // Data freshness indicator: update dot colour + blink
-    if (s_data_dot) {
+    // Data freshness indicator: update all per-screen dots with colour + blink
+    {
         enum DotState : uint8_t { DS_NEVER, DS_FLASH, DS_LIVE, DS_STALE };
         static DotState last_dot_state = DS_NEVER;
         static uint32_t last_blink_ms  = 0;
@@ -1661,21 +1668,26 @@ void loop() {
             else if (age < 30000) state = DS_LIVE;
             else                  state = DS_STALE;
         }
+        lv_color_t col;
         if (state != last_dot_state) {
-            lv_color_t col;
             switch (state) {
                 case DS_FLASH: col = lv_color_hex(0x00FF40); break;  // bright green
                 case DS_LIVE:  col = lv_color_hex(0x00A030); break;  // green
                 case DS_STALE: col = lv_color_hex(0xFF2020); break;  // red
                 default:       col = lv_color_hex(0x606060); break;  // gray
             }
-            lv_obj_set_style_bg_color(s_data_dot, col, 0);
+            for (int i = 0; i < 5; i++) {
+                if (s_data_dots[i]) lv_obj_set_style_bg_color(s_data_dots[i], col, 0);
+            }
             last_dot_state = state;
         }
         if (now_ms - last_blink_ms >= 500) {
             blink_on = !blink_on;
             last_blink_ms = now_ms;
-            lv_obj_set_style_bg_opa(s_data_dot, blink_on ? LV_OPA_90 : LV_OPA_20, 0);
+            lv_opa_t opa = blink_on ? LV_OPA_90 : LV_OPA_20;
+            for (int i = 0; i < 5; i++) {
+                if (s_data_dots[i]) lv_obj_set_style_bg_opa(s_data_dots[i], opa, 0);
+            }
         }
     }
 

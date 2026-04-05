@@ -554,7 +554,7 @@ void load_preferences() {
     if (preferences.begin(SETTINGS_NAMESPACE, true)) {
         saved_ssid = preferences.getString("ssid", "");
         saved_password = preferences.getString("password", "");
-        saved_signalk_ip = preferences.getString("signalk_ip", "openplotter.local");
+        saved_signalk_ip = preferences.getString("signalk_ip", "");
         saved_signalk_port = preferences.getUShort("signalk_port", 0);
         saved_hostname = preferences.getString("hostname", "");
         // Load auto-scroll interval (seconds)
@@ -2405,7 +2405,26 @@ void reconnect_wifi() {
     if (saved_ssid.length() == 0) return;
     Serial.println("[WiFi] Reconnecting with saved credentials...");
     WiFi.disconnect(false);
+    delay(100);
     WiFi.begin(saved_ssid.c_str(), saved_password.c_str());
+
+    // Wait up to 10s for reconnection (use vTaskDelay — may be called from a FreeRTOS task)
+    unsigned long t0 = millis();
+    while (WiFi.status() != WL_CONNECTED && (millis() - t0) < 10000UL) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+        WiFi.setSleep(false);
+        Serial.printf("[WiFi] Reconnected! IP: %s\n", WiFi.localIP().toString().c_str());
+        // Restart mDNS so hostname.local resolves on the new association
+        MDNS.end();
+        if (saved_hostname.length() > 0 && MDNS.begin(saved_hostname.c_str())) {
+            Serial.println("[mDNS] Responder restarted: " + saved_hostname + ".local");
+        }
+    } else {
+        Serial.println("[WiFi] Reconnect failed — will retry");
+    }
 }
 
 void setup_network() {

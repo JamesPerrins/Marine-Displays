@@ -182,6 +182,8 @@ float get_sensor_value(int index) {
 
 // Timestamp of most recent data update. 0 = no data received yet.
 static volatile uint32_t s_last_any_update_ms = 0;
+// Set by wsEvent CONNECTED; consumed in task loop so ws_client.loop() isn't blocked
+static bool s_metadata_fetch_pending = false;
 uint32_t get_last_data_update_ms() { return s_last_any_update_ms; }
 
 // Thread-safe setter for any sensor value
@@ -450,10 +452,10 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
         ws_client.sendTXT(out);
         // flush any queued outgoing messages (resubscribe, etc)
         flush_outgoing();
-        
-        // Fetch metadata for all configured paths via REST API
-        fetch_all_metadata();
-        
+        // Metadata fetch is deferred to the task loop so it doesn't block
+        // ws_client.loop() — blocking here causes the server to time out the
+        // WebSocket and disconnect before any data arrives.
+        s_metadata_fetch_pending = true;
         return;
     }
 
@@ -594,6 +596,15 @@ static void signalk_task(void *parameter) {
         // so that `now - last_message_time` doesn't underflow to ~4 billion.
         ws_client.loop();
         flush_outgoing();
+
+        // Deferred metadata fetch — triggered by wsEvent CONNECTED.
+        // Done here (not inside wsEvent) so ws_client.loop() continues during HTTP calls.
+        if (s_metadata_fetch_pending) {
+            s_metadata_fetch_pending = false;
+            fetch_all_metadata();
+            // Keep the WebSocket alive during the fetch by calling loop() one more time
+            ws_client.loop();
+        }
 
         unsigned long now = millis();
 

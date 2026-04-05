@@ -529,6 +529,21 @@ void save_preferences(bool skip_screen_blobs = false) {
         } else {
             Serial.println("[SD SAVE] Failed to open /config/signalk_paths.txt for writing");
         }
+
+        // Save network settings to SD — survives NVS wipe
+        File nf = SD_MMC.open("/config/network.txt", FILE_WRITE);
+        if (nf) {
+            nf.println(saved_ssid);
+            nf.println(saved_password);
+            nf.println(saved_signalk_ip);
+            nf.println(String(saved_signalk_port));
+            nf.println(saved_hostname);
+            nf.flush();
+            nf.close();
+            Serial.println("[SD SAVE] Wrote /config/network.txt");
+        } else {
+            Serial.println("[SD SAVE] Failed to open /config/network.txt for writing");
+        }
     }
 } // end save_preferences
 
@@ -585,6 +600,33 @@ void load_preferences() {
             }
         }
     }
+    // If NVS was wiped, restore network settings from SD fallback
+    if (saved_ssid.length() == 0 || saved_signalk_ip.length() == 0) {
+        const char* nfpath = "/config/network.txt";
+        if (SD_MMC.exists(nfpath)) {
+            File nf = SD_MMC.open(nfpath, FILE_READ);
+            if (nf) {
+                String line;
+                auto readLine = [&]() -> String {
+                    String s = nf.readStringUntil('\n'); s.trim(); return s;
+                };
+                String sd_ssid     = readLine();
+                String sd_password = readLine();
+                String sd_sk_ip    = readLine();
+                String sd_port_str = readLine();
+                String sd_hostname = readLine();
+                nf.close();
+                if (saved_ssid.length()       == 0 && sd_ssid.length()    > 0) { saved_ssid       = sd_ssid;              Serial.println("[SD LOAD] Restored ssid from network.txt"); }
+                if (saved_password.length()   == 0 && sd_password.length()> 0) { saved_password   = sd_password;          Serial.println("[SD LOAD] Restored password from network.txt"); }
+                if (saved_signalk_ip.length() == 0 && sd_sk_ip.length()   > 0) { saved_signalk_ip = sd_sk_ip;             Serial.println("[SD LOAD] Restored signalk_ip from network.txt"); }
+                if (saved_signalk_port        == 0 && sd_port_str.length()> 0) { saved_signalk_port = (uint16_t)sd_port_str.toInt(); Serial.println("[SD LOAD] Restored signalk_port from network.txt"); }
+                if (saved_hostname.length()   == 0 && sd_hostname.length()> 0) { saved_hostname   = sd_hostname;          Serial.println("[SD LOAD] Restored hostname from network.txt"); }
+            } else {
+                Serial.println("[SD LOAD] Failed to open /config/network.txt");
+            }
+        }
+    }
+
     Serial.printf("[DEBUG] Loaded settings: ssid='%s' signalk_ip='%s' port=%u\n",
                   saved_ssid.c_str(), saved_signalk_ip.c_str(), saved_signalk_port);
 
@@ -2355,6 +2397,16 @@ void handle_save_needles() {
     config_server.send(302, "text/plain", "");
 }
 
+
+// Reconnect WiFi using saved credentials.
+// WiFi.reconnect() is unreliable on ESP32 — calling disconnect()+begin() is the
+// only robust path after a dropped association.
+void reconnect_wifi() {
+    if (saved_ssid.length() == 0) return;
+    Serial.println("[WiFi] Reconnecting with saved credentials...");
+    WiFi.disconnect(false);
+    WiFi.begin(saved_ssid.c_str(), saved_password.c_str());
+}
 
 void setup_network() {
     Serial.begin(115200);

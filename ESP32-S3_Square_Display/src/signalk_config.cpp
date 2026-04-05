@@ -564,6 +564,31 @@ static void signalk_task(void *parameter) {
             continue;
         }
 
+        // WiFi watchdog — if the underlying WiFi connection drops, pause WS
+        // attempts and call reconnect_wifi() every 10s until it comes back.
+        // WiFi.reconnect() is unreliable on ESP32; disconnect()+begin() is used instead.
+        static bool wifi_was_lost = false;
+        if (WiFi.status() != WL_CONNECTED) {
+            static unsigned long last_wifi_reconnect = 0;
+            unsigned long now_w = millis();
+            // Clean up WS state once on first detection so stale socket is gone
+            if (!wifi_was_lost) {
+                ws_client.disconnect();
+                wifi_was_lost = true;
+            }
+            if (now_w - last_wifi_reconnect >= 10000UL) {
+                last_wifi_reconnect = now_w;
+                Serial.println("[SK] WiFi lost — attempting reconnect");
+                reconnect_wifi();
+            }
+            // Reset WS backoff so it reconnects promptly once WiFi is back
+            next_reconnect_at = 0;
+            current_backoff_ms = RECONNECT_BASE_MS;
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+        wifi_was_lost = false;  // WiFi is up — clear flag for next drop
+
         // CRITICAL: ws_client.loop() may fire wsEvent() which sets
         // last_message_time = millis(). We MUST sample `now` AFTER loop()
         // so that `now - last_message_time` doesn't underflow to ~4 billion.

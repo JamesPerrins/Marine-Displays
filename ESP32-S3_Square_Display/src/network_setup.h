@@ -50,6 +50,9 @@ extern volatile uint16_t g_pending_auto_scroll_sec;
 // Check if WiFi is connected
 bool is_wifi_connected();
 
+// Reconnect WiFi using saved credentials (disconnect + begin — more reliable than WiFi.reconnect())
+void reconnect_wifi();
+
 // Get configured Signal K server IP (empty string if not configured)
 String get_signalk_server_ip();
 

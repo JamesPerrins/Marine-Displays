@@ -538,8 +538,12 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
     }
 }
 
-// Helper: begin WS connection
+// Helper: begin WS connection — always disconnect first to reset library state,
+// otherwise calling begin() while a previous attempt is in-flight corrupts the
+// WebSocketsClient internal TCP state and the connect storm never resolves.
 static void ws_begin_connection() {
+    ws_client.disconnect();
+    vTaskDelay(pdMS_TO_TICKS(100));
     ws_client.begin(server_ip_str.c_str(), server_port_num, "/signalk/v1/stream");
     ws_client.onEvent(wsEvent);
 }

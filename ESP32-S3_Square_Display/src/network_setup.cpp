@@ -2438,6 +2438,9 @@ void setup_network() {
     // Note: Do not load preferences here; caller should load before UI init when required.
     // WiFi connect or AP fallback
     WiFi.mode(WIFI_STA);
+    // Brief settle time — after a hard reset (flash) the radio needs longer than
+    // after a soft reboot. Without this the first begin() often fails to associate.
+    delay(500);
     // If a hostname is configured, set it before connecting so DHCP uses it
     if (saved_hostname.length() > 0) {
         WiFi.setHostname(saved_hostname.c_str());
@@ -2445,8 +2448,11 @@ void setup_network() {
     }
     WiFi.begin(saved_ssid.c_str(), saved_password.c_str());
     Serial.print("Connecting to WiFi");
+    // Allow up to 60s when credentials are saved (hard reset after flash needs more time).
+    // Fall back to 15s if no credentials (nothing to wait for).
+    int max_tries = (saved_ssid.length() > 0) ? 120 : 30;
     int tries = 0;
-    while (WiFi.status() != WL_CONNECTED && tries < 30) {
+    while (WiFi.status() != WL_CONNECTED && tries < max_tries) {
         delay(500);
         Serial.print(".");
         tries++;

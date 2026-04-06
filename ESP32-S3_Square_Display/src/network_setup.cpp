@@ -2404,8 +2404,9 @@ void handle_save_needles() {
 void reconnect_wifi() {
     if (saved_ssid.length() == 0) return;
     Serial.println("[WiFi] Reconnecting with saved credentials...");
-    WiFi.disconnect(false);
-    delay(100);
+    WiFi.disconnect(true);   // true = also clear the IP/DHCP state
+    vTaskDelay(pdMS_TO_TICKS(200));
+    WiFi.mode(WIFI_STA);     // re-assert STA mode — can reset after a drop
     WiFi.begin(saved_ssid.c_str(), saved_password.c_str());
 
     // Wait up to 10s for reconnection (use vTaskDelay — may be called from a FreeRTOS task)

@@ -333,8 +333,9 @@ static void fetch_metadata_for_path(int index, const String &path) {
                  + "/signalk/v1/api/vessels/self/" + rest_path + "/meta";
 
     esp_task_wdt_reset();
+    ws_client.loop();  // keep WS alive while we do HTTP
     http.begin(url);
-    http.setTimeout(1500);
+    http.setTimeout(500);
     int httpCode = http.GET();
 
     if (httpCode == HTTP_CODE_OK) {
@@ -390,8 +391,9 @@ void fetch_all_metadata() {
                          "/signalk/v1/api/vessels/self/" + api_path + "/meta";
 
             esp_task_wdt_reset();
+            ws_client.loop();  // keep WS alive while we do HTTP
             HTTPClient http;
-            http.setTimeout(1500);
+            http.setTimeout(500);
             http.begin(url);
             int httpCode = http.GET();
 
